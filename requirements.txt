@@ -1,0 +1,10 @@
+streamlit
+google-generativeai
+qdrant-client
+PyPDF2
+python-dotenv
+sentence-transformers
+langchain
+langchain-community
+numpy
+pandas
