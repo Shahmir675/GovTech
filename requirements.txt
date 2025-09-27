@@ -3,8 +3,10 @@ google-generativeai
 qdrant-client
 PyPDF2
 python-dotenv
-sentence-transformers
 langchain
-langchain-community
+langchain-text-splitters
 numpy
 pandas
+sentence-transformers
+torch
+transformers

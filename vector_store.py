@@ -1,125 +1,111 @@
-import os
-from typing import List, Dict, Any
 from qdrant_client import QdrantClient
-from qdrant_client.http import models
-from sentence_transformers import SentenceTransformer
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from typing import List, Dict, Any
 import numpy as np
-from dotenv import load_dotenv
+import uuid
+from sentence_transformers import SentenceTransformer
 
-load_dotenv()
-
-class VectorStore:
-    def __init__(self):
-        self.qdrant_url = os.getenv('QDRANT_URL')
-        self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
-        self.collection_name = os.getenv('COLLECTION_NAME', 'kp_local_government_act')
-        self.vector_size = int(os.getenv('VECTOR_SIZE', 768))
+class QdrantVectorStore:
+    def __init__(self, url: str, api_key: str, collection_name: str):
+        self.client = QdrantClient(url=url, api_key=api_key)
+        self.collection_name = collection_name
         
-        # Initialize Qdrant client
-        self.client = QdrantClient(
-            url=self.qdrant_url,
-            api_key=self.qdrant_api_key
-        )
-        
-        # Initialize embedding model
-        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-        
-    def create_collection(self):
-        """Create collection if it doesn't exist"""
+        # Initialize Sentence Transformer embedding model
         try:
-            collections = self.client.get_collections()
-            collection_names = [col.name for col in collections.collections]
-            
-            if self.collection_name not in collection_names:
-                self.client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=models.VectorParams(
-                        size=self.vector_size,
-                        distance=models.Distance.COSINE
-                    )
-                )
-                print(f"Created collection: {self.collection_name}")
-            else:
-                print(f"Collection {self.collection_name} already exists")
+            print("Loading Sentence Transformer model...")
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.embedding_dim = 384  # Dimension for all-MiniLM-L6-v2
+            print("✅ Sentence Transformer model loaded successfully")
         except Exception as e:
-            print(f"Error creating collection: {e}")
-    
-    def encode_texts(self, texts: List[str]) -> np.ndarray:
-        """Convert texts to embeddings"""
-        embeddings = self.encoder.encode(texts)
-        return embeddings
-    
-    def add_documents(self, texts: List[str], metadata: List[Dict[str, Any]] = None):
-        """Add documents to vector store"""
-        if not texts:
-            return
+            raise Exception(f"Failed to load Sentence Transformer model: {e}")
         
-        embeddings = self.encode_texts(texts)
+        # Create collection if it doesn't exist
+        self._create_collection_if_not_exists()
+    
+    def _create_collection_if_not_exists(self):
+        """Create collection with appropriate vector configuration"""
+        collections = self.client.get_collections().collections
+        collection_names = [col.name for col in collections]
         
+        if self.collection_name not in collection_names:
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=self.embedding_dim,  # Dynamic embedding dimension
+                    distance=Distance.COSINE
+                )
+            )
+    
+    def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings using Sentence Transformers"""
+        try:
+            print(f"Generating embeddings for {len(texts)} texts...")
+            embeddings = self.embedding_model.encode(texts).tolist()
+            print(f"✅ Successfully generated {len(embeddings)} embeddings")
+            return embeddings
+        except Exception as e:
+            print(f"Error generating embeddings: {e}")
+            # Return zero vectors as fallback
+            return [[0.0] * self.embedding_dim] * len(texts)
+    
+    def add_documents(self, texts: List[str], metadatas: List[Dict[str, Any]] = None):
+        """Add documents to the vector store"""
+        if metadatas is None:
+            metadatas = [{"text": text, "chunk_id": i} for i, text in enumerate(texts)]
+        
+        # Generate embeddings
+        embeddings = self.get_embeddings(texts)
+        
+        # Create points for Qdrant
         points = []
-        for i, (text, embedding) in enumerate(zip(texts, embeddings)):
-            payload = {
-                "text": text,
-                "chunk_id": i
-            }
-            
-            # Add metadata if provided
-            if metadata and i < len(metadata):
-                payload.update(metadata[i])
-            
-            point = models.PointStruct(
-                id=i,
-                vector=embedding.tolist(),
-                payload=payload
+        for i, (text, embedding, metadata) in enumerate(zip(texts, embeddings, metadatas)):
+            point = PointStruct(
+                id=str(uuid.uuid4()),
+                vector=embedding,
+                payload={
+                    "text": text,
+                    "metadata": metadata
+                }
             )
             points.append(point)
         
-        try:
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=points
-            )
-            print(f"Added {len(points)} documents to collection")
-        except Exception as e:
-            print(f"Error adding documents: {e}")
+        # Upsert points to collection
+        self.client.upsert(
+            collection_name=self.collection_name,
+            points=points
+        )
     
     def search(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """Search for similar documents"""
-        try:
-            query_embedding = self.encode_texts([query])[0]
-            
-            search_result = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=query_embedding.tolist(),
-                limit=limit
-            )
-            
-            results = []
-            for point in search_result:
-                results.append({
-                    "text": point.payload["text"],
-                    "score": point.score,
-                    "chunk_id": point.payload.get("chunk_id", 0)
-                })
-            
-            return results
-        except Exception as e:
-            print(f"Error searching: {e}")
-            return []
-    
-    def delete_collection(self):
-        """Delete the collection"""
-        try:
-            self.client.delete_collection(collection_name=self.collection_name)
-            print(f"Deleted collection: {self.collection_name}")
-        except Exception as e:
-            print(f"Error deleting collection: {e}")
+        # Generate query embedding
+        query_embedding = self.get_embeddings([query])[0]
+        
+        # Search in Qdrant
+        search_results = self.client.search(
+            collection_name=self.collection_name,
+            query_vector=query_embedding,
+            limit=limit
+        )
+        
+        # Format results
+        results = []
+        for result in search_results:
+            results.append({
+                "text": result.payload["text"],
+                "score": result.score,
+                "metadata": result.payload.get("metadata", {})
+            })
+        
+        return results
     
     def get_collection_info(self):
         """Get information about the collection"""
         try:
-            info = self.client.get_collection(collection_name=self.collection_name)
-            return info
+            info = self.client.get_collection(self.collection_name)
+            return {
+                "status": info.status,
+                "vectors_count": info.vectors_count,
+                "points_count": info.points_count
+            }
         except Exception as e:
-            print(f"Error getting collection info: {e}")
-            return None
+            return {"error": str(e)}

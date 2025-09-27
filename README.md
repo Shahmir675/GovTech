@@ -1,18 +1,19 @@
-# KP Local Government Act RAGBot
+# KPK Local Government Act 2013 - RAGBot
 
-An intelligent Retrieval-Augmented Generation (RAG) chatbot for exploring and understanding the **Khyber Pakhtunkhwa Local Government Act 2013**. Built with Streamlit, Qdrant Cloud, and Google's Gemini API.
+An intelligent Retrieval-Augmented Generation (RAG) chatbot for querying the Khyber Pakhtunkhwa Local Government Act 2013. Built with Streamlit, Qdrant Cloud, and Google Gemini API.
 
 ## Features
 
-- 🔍 **Intelligent Document Search**: Uses vector similarity search to find relevant sections
-- 🤖 **AI-Powered Responses**: Leverages Google Gemini for natural language understanding
-- 📚 **Context-Aware**: Provides answers based on the actual document content
-- 🎨 **User-Friendly Interface**: Clean Streamlit interface with chat functionality
-- ⚡ **Fast and Accurate**: Efficient vector search with semantic understanding
+- 🤖 Intelligent Q&A about KPK Local Government Act 2013
+- 🔍 Vector-based semantic search using Qdrant Cloud
+- 🧠 AI-powered responses using Google Gemini
+- 💬 Interactive Streamlit web interface
+- 📄 Automatic PDF processing and chunking
+- 🎯 Source attribution for transparency
 
 ## Setup Instructions
 
-### 1. Clone the Repository
+### 1. Clone and Navigate
 ```bash
 git clone <your-repo-url>
 cd ragbot-v1
@@ -24,107 +25,80 @@ pip install -r requirements.txt
 ```
 
 ### 3. Configure Environment Variables
-
-Edit the `.env` file with your actual API keys:
+Update the `.env` file with your API keys:
 
 ```env
-# Qdrant Cloud Configuration
-QDRANT_URL=https://your-cluster-url.qdrant.tech:6333
-QDRANT_API_KEY=your_qdrant_api_key_here
-
 # Gemini API Configuration
-GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_API_KEY=your_actual_gemini_api_key
 
-# Vector Database Configuration
-COLLECTION_NAME=kp_local_government_act
-VECTOR_SIZE=768
+# Qdrant Cloud Configuration
+QDRANT_URL=your_actual_qdrant_cloud_url
+QDRANT_API_KEY=your_actual_qdrant_api_key
+
+# Collection Settings
+QDRANT_COLLECTION_NAME=kpk_local_govt_act_2013
 ```
 
-#### Getting API Keys:
+### 4. Get API Keys
 
-**Qdrant Cloud:**
-1. Sign up at [qdrant.tech](https://qdrant.tech/)
-2. Create a new cluster
-3. Get your cluster URL and API key from the dashboard
-
-**Google Gemini API:**
+#### Gemini API Key (for chat responses):
 1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
 2. Create a new API key
 3. Copy the key to your `.env` file
 
-### 4. Run the Application
+#### Qdrant Cloud:
+1. Sign up at [Qdrant Cloud](https://cloud.qdrant.io/)
+2. Create a new cluster
+3. Get your cluster URL and API key
+4. Add them to your `.env` file
+
+### 5. Run the Application
 ```bash
 streamlit run app.py
 ```
 
 ## Usage
 
-1. **Initialize the RAGBot**: Click the "🚀 Initialize RAGBot" button in the sidebar
-2. **Wait for Processing**: The system will process the PDF and create vector embeddings
-3. **Ask Questions**: Use the chat interface to ask questions about the Act
-4. **Explore**: Try the sample questions or ask your own
+1. **Connect to Services**: Click "Connect to Services" in the sidebar
+2. **Load PDF Document**: Click "Load PDF Document" to process the legal document
+3. **Start Chatting**: Ask questions about the KPK Local Government Act 2013
 
-## Example Questions
-
+### Sample Questions
 - "What is the purpose of this Act?"
-- "What are the functions of local governments?"
+- "What are the powers of local government?"
 - "How are local councils constituted?"
-- "What are the powers of the District Government?"
-- "What is the role of the Provincial Government?"
+- "What are the functions of Union Councils?"
+- "What is the role of District Government?"
 
-## Project Structure
+## File Structure
 
 ```
 ragbot-v1/
-├── app.py                     # Main Streamlit application
-├── pdf_processor.py           # PDF text extraction and chunking
-├── vector_store.py           # Qdrant vector database integration
-├── gemini_client.py          # Google Gemini API client
-├── requirements.txt          # Python dependencies
-├── .env                      # Environment variables
-├── THE_KHYBER_PAKHTUNKHWA_LOCAL_GOVERNMENT_ACT_2013.pdf
-└── README.md                 # This file
+├── app.py                          # Main Streamlit application
+├── pdf_processor.py                # PDF text extraction and chunking
+├── vector_store.py                 # Qdrant vector store integration
+├── gemini_client.py                # Google Gemini API client
+├── requirements.txt                # Python dependencies
+├── .env                           # Environment variables (configure this!)
+├── README.md                      # This file
+└── THE_KHYBER_PAKHTUNKHWA_LOCAL_GOVERNMENT_ACT_2013.pdf
 ```
 
 ## Technical Details
 
-### Components
-
-1. **PDF Processing**: Extracts text from PDF and splits into overlapping chunks
-2. **Vector Store**: Uses Qdrant Cloud for storing and searching document embeddings
-3. **AI Integration**: Google Gemini provides natural language understanding
-4. **Web Interface**: Streamlit provides the interactive chat interface
-
-### Architecture
-
-```
-User Query → Vector Search → Context Retrieval → Gemini API → Response
-```
+- **PDF Processing**: Uses PyPDF2 for text extraction and LangChain for intelligent chunking
+- **Vector Storage**: Qdrant Cloud for scalable vector storage and similarity search
+- **Embeddings**: Sentence Transformers (all-MiniLM-L6-v2) for semantic understanding
+- **Chat Interface**: Streamlit for responsive web UI
+- **AI Response**: Google Gemini 1.5 Flash for generating contextual answers
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **API Key Errors**: Ensure all API keys are correctly set in `.env`
-2. **PDF Not Found**: Make sure the PDF file is in the project root
-3. **Vector Store Issues**: Check Qdrant Cloud connection and API key
-4. **Import Errors**: Ensure all dependencies are installed with `pip install -r requirements.txt`
-
-### Environment Variables Check
-
-The sidebar shows the status of your environment variables:
-- ✅ Green: Properly configured
-- ❌ Red: Missing or incorrect configuration
-
-## Dependencies
-
-- **streamlit**: Web interface framework
-- **google-generativeai**: Google Gemini API client
-- **qdrant-client**: Qdrant vector database client
-- **PyPDF2**: PDF text extraction
-- **sentence-transformers**: Text embedding models
-- **python-dotenv**: Environment variable management
+1. **API Key Issues**: Ensure all API keys are correctly set in `.env`
+2. **Connection Problems**: Check your internet connection and API key validity
+3. **PDF Processing Errors**: Ensure the PDF file exists in the project directory
+4. **Empty Responses**: Verify the document was loaded successfully
 
 ## License
 
-This project is for educational and research purposes related to understanding local government legislation.
+This project is for educational and research purposes.

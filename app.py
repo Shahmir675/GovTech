@@ -1,14 +1,18 @@
 import streamlit as st
 import os
-from typing import List
+from dotenv import load_dotenv
 from pdf_processor import PDFProcessor
-from vector_store import VectorStore
+from vector_store import QdrantVectorStore
 from gemini_client import GeminiClient
+import time
+
+# Load environment variables
+load_dotenv()
 
 # Page configuration
 st.set_page_config(
-    page_title="KP Local Government Act RAGBot",
-    page_icon="⚖️",
+    page_title="KPK Local Government Act 2013 - RAGBot",
+    page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -17,208 +21,211 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-header {
-        font-size: 2.5rem;
-        color: #1f4e79;
+        font-size: 2.5em;
+        color: #1f77b4;
         text-align: center;
-        margin-bottom: 2rem;
+        margin-bottom: 30px;
     }
     .chat-message {
         padding: 1rem;
         border-radius: 0.5rem;
         margin-bottom: 1rem;
+        display: flex;
+        align-items: flex-start;
     }
-    .user-message {
-        background-color: #e3f2fd;
-        border-left: 4px solid #2196f3;
+    .chat-message.user {
+        background-color: #2b313e;
     }
-    .bot-message {
-        background-color: #f1f8e9;
-        border-left: 4px solid #4caf50;
+    .chat-message.bot {
+        background-color: #475063;
+    }
+    .chat-message .message {
+        flex: 1;
+        padding-left: 1rem;
     }
     .sidebar-info {
-        background-color: #f5f5f5;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 20px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
-if 'vector_store' not in st.session_state:
-    st.session_state.vector_store = None
-if 'gemini_client' not in st.session_state:
-    st.session_state.gemini_client = None
-if 'documents_loaded' not in st.session_state:
-    st.session_state.documents_loaded = False
+def initialize_session_state():
+    """Initialize session state variables"""
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    if 'vector_store' not in st.session_state:
+        st.session_state.vector_store = None
+    if 'gemini_client' not in st.session_state:
+        st.session_state.gemini_client = None
+    if 'documents_loaded' not in st.session_state:
+        st.session_state.documents_loaded = False
 
-def initialize_clients():
-    """Initialize the vector store and Gemini client"""
+def setup_connections():
+    """Setup connections to Qdrant and Gemini"""
     try:
+        # Get environment variables
+        gemini_api_key = os.getenv('GEMINI_API_KEY')
+        qdrant_url = os.getenv('QDRANT_URL')
+        qdrant_api_key = os.getenv('QDRANT_API_KEY')
+        collection_name = os.getenv('QDRANT_COLLECTION_NAME', 'kpk_local_govt_act_2013')
+        
+        if not all([gemini_api_key, qdrant_url, qdrant_api_key]):
+            st.error("Please configure all required API keys in the .env file")
+            return False
+        
+        # Initialize clients
         if st.session_state.vector_store is None:
-            st.session_state.vector_store = VectorStore()
+            with st.spinner("Connecting to Qdrant Cloud and loading embedding model..."):
+                st.session_state.vector_store = QdrantVectorStore(
+                    url=qdrant_url,
+                    api_key=qdrant_api_key,
+                    collection_name=collection_name
+                )
+        
         if st.session_state.gemini_client is None:
-            st.session_state.gemini_client = GeminiClient()
+            with st.spinner("Initializing Gemini client..."):
+                st.session_state.gemini_client = GeminiClient(gemini_api_key)
+        
         return True
     except Exception as e:
-        st.error(f"Error initializing clients: {e}")
+        st.error(f"Error setting up connections: {str(e)}")
         return False
 
-def load_and_process_pdf():
+def load_documents():
     """Load and process the PDF document"""
-    pdf_path = "THE_KHYBER_PAKHTUNKHWA_LOCAL_GOVERNMENT_ACT_2013.pdf"
-    
-    if not os.path.exists(pdf_path):
-        st.error(f"PDF file not found: {pdf_path}")
-        return False
+    if st.session_state.documents_loaded:
+        return True
     
     try:
+        pdf_path = "THE_KHYBER_PAKHTUNKHWA_LOCAL_GOVERNMENT_ACT_2013.pdf"
+        
+        if not os.path.exists(pdf_path):
+            st.error(f"PDF file not found: {pdf_path}")
+            return False
+        
         with st.spinner("Processing PDF document..."):
             # Process PDF
-            processor = PDFProcessor(pdf_path)
-            chunks = processor.process_pdf(chunk_size=1000, overlap=200)
+            processor = PDFProcessor(chunk_size=1000, chunk_overlap=200)
+            chunks = processor.process_pdf(pdf_path)
             
-            if not chunks:
-                st.error("No text could be extracted from the PDF")
-                return False
-            
-            # Create collection and add documents
-            st.session_state.vector_store.create_collection()
+            # Add documents to vector store
             st.session_state.vector_store.add_documents(chunks)
+            st.session_state.documents_loaded = True
             
             st.success(f"Successfully processed {len(chunks)} document chunks!")
-            st.session_state.documents_loaded = True
             return True
             
     except Exception as e:
-        st.error(f"Error processing PDF: {e}")
+        st.error(f"Error loading documents: {str(e)}")
         return False
 
-def search_and_respond(user_query: str) -> str:
-    """Search for relevant documents and generate response"""
-    try:
-        # Search for relevant documents
-        search_results = st.session_state.vector_store.search(user_query, limit=3)
-        
-        if not search_results:
-            return "I couldn't find relevant information in the document. Please try rephrasing your question."
-        
-        # Extract context documents
-        context_docs = [result["text"] for result in search_results]
-        
-        # Generate response using Gemini
-        response = st.session_state.gemini_client.generate_response(user_query, context_docs)
-        
-        return response
-        
-    except Exception as e:
-        return f"Error generating response: {e}"
-
-# Main app
 def main():
-    st.markdown('<h1 class="main-header">⚖️ KP Local Government Act RAGBot</h1>', unsafe_allow_html=True)
+    # Initialize session state
+    initialize_session_state()
+    
+    # Header
+    st.markdown('<h1 class="main-header">📚 KPK Local Government Act 2013 - RAGBot</h1>', unsafe_allow_html=True)
     
     # Sidebar
     with st.sidebar:
-        st.markdown('<div class="sidebar-info">', unsafe_allow_html=True)
-        st.markdown("### 📋 About")
-        st.markdown("This RAGBot helps you explore and understand the **Khyber Pakhtunkhwa Local Government Act 2013**.")
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("### 🛠️ Configuration")
         
-        st.markdown("### 🔧 Configuration")
-        
-        # Check environment variables
-        env_status = {
-            "Qdrant URL": os.getenv('QDRANT_URL', 'Not set'),
-            "Qdrant API Key": "Set" if os.getenv('QDRANT_API_KEY') else "Not set",
-            "Gemini API Key": "Set" if os.getenv('GEMINI_API_KEY') else "Not set"
-        }
-        
-        for key, value in env_status.items():
-            if value == "Not set":
-                st.error(f"{key}: {value}")
+        # Setup connections
+        if st.button("🔌 Connect to Services", type="primary"):
+            if setup_connections():
+                st.success("✅ Connected successfully!")
             else:
-                st.success(f"{key}: {value if key == 'Qdrant URL' else 'Set'}")
+                st.error("❌ Connection failed!")
         
-        st.markdown("### 📚 Document Status")
-        if st.session_state.documents_loaded:
-            st.success("✅ Documents loaded")
-            if st.session_state.vector_store:
-                try:
-                    info = st.session_state.vector_store.get_collection_info()
-                    if info:
-                        st.info(f"Collection: {info.config.params.vectors.size} dimensions")
-                except:
-                    pass
-        else:
-            st.warning("⏳ Documents not loaded")
+        # Load documents
+        if st.session_state.vector_store is not None and not st.session_state.documents_loaded:
+            if st.button("📄 Load PDF Document", type="primary"):
+                load_documents()
         
-        # Initialize and load documents button
-        if st.button("🚀 Initialize RAGBot", type="primary"):
-            if initialize_clients():
-                load_and_process_pdf()
+        # Collection info
+        if st.session_state.vector_store is not None:
+            st.markdown("### 📊 Collection Status")
+            info = st.session_state.vector_store.get_collection_info()
+            if 'error' not in info:
+                st.markdown(f"""
+                <div class="sidebar-info">
+                    <strong>Status:</strong> {info.get('status', 'Unknown')}<br>
+                    <strong>Documents:</strong> {info.get('points_count', 0)}<br>
+                    <strong>Vectors:</strong> {info.get('vectors_count', 0)}<br>
+                    <strong>Embedding Model:</strong> Sentence Transformers
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.error(f"Collection error: {info['error']}")
         
-        st.markdown("### 💡 Sample Questions")
-        sample_questions = [
+        # Sample queries
+        st.markdown("### 💡 Sample Queries")
+        sample_queries = [
             "What is the purpose of this Act?",
-            "What are the functions of local governments?",
+            "What are the powers of local government?",
             "How are local councils constituted?",
-            "What are the powers of the District Government?",
-            "What is the role of the Provincial Government?"
+            "What are the functions of Union Councils?",
+            "What is the role of District Government?"
         ]
         
-        for question in sample_questions:
-            if st.button(question, key=f"sample_{question}"):
-                st.session_state.messages.append({"role": "user", "content": question})
+        for query in sample_queries:
+            if st.button(query, key=f"sample_{hash(query)}"):
+                st.session_state.messages.append({"role": "user", "content": query})
                 st.rerun()
-
-    # Main content area
-    if not st.session_state.documents_loaded:
-        st.info("👈 Please initialize the RAGBot using the sidebar to get started!")
-        st.markdown("### 🔍 What you can ask:")
-        st.markdown("""
-        - **General questions** about the KP Local Government Act 2013
-        - **Specific provisions** and their explanations
-        - **Legal definitions** and terminology
-        - **Procedural requirements** and processes
-        - **Powers and responsibilities** of different entities
-        """)
+    
+    # Main chat interface
+    if st.session_state.vector_store is None or st.session_state.gemini_client is None:
+        st.warning("⚠️ Please connect to services first using the sidebar.")
         return
     
-    # Chat interface
-    st.markdown("### 💬 Ask about the KP Local Government Act 2013")
+    if not st.session_state.documents_loaded:
+        st.warning("⚠️ Please load the PDF document first using the sidebar.")
+        return
     
     # Display chat messages
     for message in st.session_state.messages:
-        role = message["role"]
-        content = message["content"]
-        
-        if role == "user":
-            st.markdown(f'<div class="chat-message user-message"><strong>You:</strong> {content}</div>', 
-                       unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="chat-message bot-message"><strong>RAGBot:</strong> {content}</div>', 
-                       unsafe_allow_html=True)
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
     
     # Chat input
-    if prompt := st.chat_input("Ask your question about the KP Local Government Act 2013..."):
+    if prompt := st.chat_input("Ask about the KPK Local Government Act 2013..."):
         # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
         
-        # Generate and add bot response
-        with st.spinner("Thinking..."):
-            response = search_and_respond(prompt)
-        
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        st.rerun()
-    
-    # Clear chat button
-    if st.session_state.messages:
-        if st.button("🗑️ Clear Chat"):
-            st.session_state.messages = []
-            st.rerun()
+        # Generate response
+        with st.chat_message("assistant"):
+            with st.spinner("Searching documents and generating response..."):
+                try:
+                    # Search for relevant documents
+                    search_results = st.session_state.vector_store.search(prompt, limit=5)
+                    
+                    if not search_results:
+                        response = "I couldn't find relevant information in the document. Please try rephrasing your question."
+                    else:
+                        # Generate response using Gemini
+                        response = st.session_state.gemini_client.generate_response(prompt, search_results)
+                    
+                    st.markdown(response)
+                    
+                    # Show sources
+                    if search_results:
+                        with st.expander("📖 View Sources"):
+                            for i, result in enumerate(search_results):
+                                st.markdown(f"**Source {i+1}** (Relevance: {result['score']:.3f})")
+                                st.markdown(f"```\n{result['text'][:300]}...\n```")
+                    
+                except Exception as e:
+                    error_msg = f"Error generating response: {str(e)}"
+                    st.error(error_msg)
+                    response = error_msg
+                
+                # Add assistant response to chat history
+                st.session_state.messages.append({"role": "assistant", "content": response})
 
 if __name__ == "__main__":
     main()
