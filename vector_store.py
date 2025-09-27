@@ -27,14 +27,36 @@ class QdrantVectorStore:
         collections = self.client.get_collections().collections
         collection_names = [col.name for col in collections]
         
-        if self.collection_name not in collection_names:
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=self.embedding_dim,  # Dynamic embedding dimension
-                    distance=Distance.COSINE
-                )
+        if self.collection_name in collection_names:
+            # Check if existing collection has correct dimensions
+            try:
+                collection_info = self.client.get_collection(self.collection_name)
+                existing_dim = collection_info.config.params.vectors.size
+                
+                if existing_dim != self.embedding_dim:
+                    print(f"⚠️  Collection exists with wrong dimensions ({existing_dim} vs {self.embedding_dim})")
+                    print("🗑️  Deleting existing collection...")
+                    self.client.delete_collection(self.collection_name)
+                    print("✅ Old collection deleted")
+                else:
+                    print(f"✅ Collection exists with correct dimensions ({self.embedding_dim})")
+                    return
+            except Exception as e:
+                print(f"Error checking collection: {e}, recreating...")
+                try:
+                    self.client.delete_collection(self.collection_name)
+                except:
+                    pass  # Collection might not exist
+        
+        print(f"🔨 Creating new collection with {self.embedding_dim} dimensions...")
+        self.client.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=VectorParams(
+                size=self.embedding_dim,  # Dynamic embedding dimension
+                distance=Distance.COSINE
             )
+        )
+        print("✅ Collection created successfully")
     
     def get_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings using Sentence Transformers"""
@@ -109,3 +131,31 @@ class QdrantVectorStore:
             }
         except Exception as e:
             return {"error": str(e)}
+    
+    def delete_collection(self):
+        """Delete the collection (useful for resetting)"""
+        try:
+            self.client.delete_collection(self.collection_name)
+            print(f"✅ Collection '{self.collection_name}' deleted successfully")
+            return True
+        except Exception as e:
+            print(f"❌ Error deleting collection: {e}")
+            return False
+    
+    def recreate_collection(self):
+        """Delete and recreate the collection with current dimensions"""
+        try:
+            # Delete if exists
+            collections = self.client.get_collections().collections
+            collection_names = [col.name for col in collections]
+            
+            if self.collection_name in collection_names:
+                self.client.delete_collection(self.collection_name)
+                print(f"🗑️  Deleted existing collection '{self.collection_name}'")
+            
+            # Create new
+            self._create_collection_if_not_exists()
+            return True
+        except Exception as e:
+            print(f"❌ Error recreating collection: {e}")
+            return False

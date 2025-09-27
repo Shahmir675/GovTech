@@ -145,6 +145,31 @@ def main():
             if st.button("📄 Load PDF Document", type="primary"):
                 load_documents()
         
+        # Collection management
+        if st.session_state.vector_store is not None:
+            st.markdown("### 🔧 Collection Management")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("🔄 Recreate Collection"):
+                    with st.spinner("Recreating collection..."):
+                        if st.session_state.vector_store.recreate_collection():
+                            st.session_state.documents_loaded = False
+                            st.success("✅ Collection recreated!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to recreate collection")
+            
+            with col2:
+                if st.button("🗑️ Clear Collection"):
+                    with st.spinner("Clearing collection..."):
+                        if st.session_state.vector_store.delete_collection():
+                            st.session_state.documents_loaded = False
+                            st.success("✅ Collection cleared!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to clear collection")
+        
         # Collection info
         if st.session_state.vector_store is not None:
             st.markdown("### 📊 Collection Status")
