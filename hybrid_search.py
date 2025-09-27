@@ -3,6 +3,13 @@ from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import re
+import os
+
+try:
+    # CrossEncoder provides powerful pairwise re-ranking
+    from sentence_transformers import CrossEncoder  # type: ignore
+except Exception:
+    CrossEncoder = None  # Fallback if unavailable in environment
 
 # Lightweight replacements for NLTK + scikit-learn components to avoid
 # binary incompatibilities in constrained environments (e.g., Kaggle images
@@ -151,6 +158,46 @@ class HybridSearchEngine:
         self.documents = []
         self.document_embeddings = None
         self.processed_docs = []
+
+        # Optional cross-encoder re-ranker (legal-friendly if available)
+        self.reranker = None
+        self._init_reranker()
+
+    def _init_reranker(self):
+        """Initialise cross-encoder re-ranker with graceful fallback.
+
+        Picks a model tuned for QA-style relevance. Allows override via
+        RAGBOT_RERANKER_MODEL. If loading fails or dependency missing,
+        continues without re-ranking.
+        """
+        if CrossEncoder is None:
+            print("ℹ️ Cross-encoder not available; skipping re-ranking.")
+            return
+        preferred_models = [
+            # Prefer a QA/click-tuned cross-encoder; users may override via env
+            os.getenv("RAGBOT_RERANKER_MODEL", ""),
+            "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            "cross-encoder/ms-marco-MiniLM-L-12-v2",
+            "cross-encoder/stsb-roberta-base",
+        ]
+        tried = []
+        for name in preferred_models:
+            name = (name or "").strip()
+            if not name:
+                continue
+            try:
+                print(f"Loading cross-encoder reranker '{name}' ...")
+                self.reranker = CrossEncoder(name)
+                print(f"✅ Cross-encoder loaded: {name}")
+                return
+            except Exception as exc:
+                tried.append((name, str(exc)))
+                continue
+        if tried:
+            print("⚠️ Failed to load cross-encoder models:")
+            for name, err in tried:
+                print(f"   - {name}: {err}")
+        print("ℹ️ Proceeding without cross-encoder re-ranking.")
         
     def preprocess_text(self, text: str) -> str:
         """Advanced text preprocessing for legal documents"""
@@ -271,6 +318,93 @@ class HybridSearchEngine:
         self.document_embeddings = self.embedding_model.encode(doc_texts)
         
         print(f"✅ Indexed {len(documents)} documents")
+
+    # -------- Domain-aware ranking helpers --------
+    def _is_definition_query(self, query: str) -> bool:
+        q = query.lower().strip()
+        indicators = [
+            "define ",
+            "definition of ",
+            "what is the definition",
+            "meaning of ",
+            "interpretation of ",
+        ]
+        return any(tok in q for tok in indicators)
+
+    def _penalty_for_generic(self, query: str, metadata: Dict[str, Any], text: str) -> float:
+        """Return a penalty in [0, 0.25] for generic sections unless explicitly asked."""
+        if self._is_definition_query(query):
+            return 0.0
+
+        title_bits = []
+        for k in ("title", "section", "chapter", "part"):
+            v = metadata.get(k)
+            if isinstance(v, str):
+                title_bits.append(v)
+        title = " ".join(title_bits).lower()
+        head = (text[:120] if text else "").lower()
+
+        generic_keys = [
+            "definitions", "interpretation", "preliminary", "general provisions",
+            "short title", "extent", "commencement", "application", "framework",
+        ]
+        hay = f"{title} {head}"
+        hits = sum(1 for k in generic_keys if k in hay)
+        if hits == 0:
+            return 0.0
+        # Scale by intensity of generic signals, cap at 0.25
+        return min(0.08 * hits, 0.25)
+
+    def _boost_for_priority_chapters(self, metadata: Dict[str, Any], text: str) -> float:
+        """Return a boost in [0, 0.35] for finance/audit/enforcement/dissolution/commission."""
+        title_bits = []
+        for k in ("title", "section", "chapter", "part"):
+            v = metadata.get(k)
+            if isinstance(v, str):
+                title_bits.append(v)
+        title = " ".join(title_bits).lower()
+        body = (text or "").lower()
+        hay = f"{title} {body[:300]}"
+
+        boost_terms = [
+            # Finance
+            "finance", "financial", "fund", "budget", "accounts", "accounting", "treasury",
+            # Audit
+            "audit", "auditor", "audited",
+            # Enforcement
+            "enforcement", "penalty", "penalties", "offence", "offense", "fines", "prosecution",
+            # Dissolution
+            "dissolution", "dissolve", "transitional", "transition",
+            # Commission (local gov/election commission contexts)
+            "commission", "local government commission", "election commission",
+        ]
+        hits = sum(1 for k in boost_terms if k in hay)
+        if hits == 0:
+            return 0.0
+        # Scale gently, cap boost
+        return min(0.06 * hits, 0.35)
+
+    def _apply_domain_bias(self, query: str, result: Dict[str, Any]) -> float:
+        """Compute additive bias to apply to the score (positive or negative)."""
+        metadata = result.get('metadata', {}) or {}
+        text = result.get('text', '') or ''
+        bonus = self._boost_for_priority_chapters(metadata, text)
+        malus = self._penalty_for_generic(query, metadata, text)
+        return bonus - malus
+
+    def _rerank_with_cross_encoder(self, query: str, results: List[Dict[str, Any]]) -> Optional[np.ndarray]:
+        """Return cross-encoder scores aligned to results order, or None if unavailable."""
+        if not results or self.reranker is None:
+            return None
+        pairs = [(query, r.get('text', '') or '') for r in results]
+        try:
+            scores = self.reranker.predict(pairs)
+            if isinstance(scores, list):
+                scores = np.asarray(scores, dtype=np.float32)
+            return scores
+        except Exception as exc:
+            print(f"⚠️ Cross-encoder scoring failed: {exc}")
+            return None
     
     def expand_query(self, query: str) -> List[str]:
         """Expand query with synonyms and related terms"""
@@ -475,7 +609,37 @@ class HybridSearchEngine:
                 }
                 final_results.append(result)
         
-        # Sort by final score
-        final_results.sort(key=lambda x: x['score'], reverse=True)
-        
-        return final_results[:top_k]
+        # Domain-aware biasing before re-ranking
+        for r in final_results:
+            r['score'] = float(r['score'] + self._apply_domain_bias(query, r))
+
+        # Cross-encoder re-ranking: blend with existing score
+        # Keep a generous candidate set to reduce drift
+        candidate_cap = max(top_k * 6, 30)
+        candidates = final_results[:candidate_cap]
+
+        ce_scores = self._rerank_with_cross_encoder(query, candidates)
+        if ce_scores is not None:
+            # Blend: cross-encoder dominates to reduce noise; retain hybrid as a prior
+            alpha = 0.30  # weight for prior hybrid score
+            beta = 0.70   # weight for CE score
+            # Normalise CE scores to 0..1 per-batch for stability
+            ce = ce_scores.astype(np.float32)
+            if ce.size > 0:
+                cemin = float(np.min(ce))
+                cemax = float(np.max(ce))
+                if cemax > cemin:
+                    ce = (ce - cemin) / (cemax - cemin)
+                else:
+                    ce = np.zeros_like(ce)
+            for i, r in enumerate(candidates):
+                prior = float(r.get('score', 0.0))
+                r['score'] = alpha * prior + beta * float(ce[i])
+
+        # Final domain-aware touch after CE blending (small adjustments)
+        for r in candidates:
+            r['score'] = float(r['score'] + 0.25 * self._apply_domain_bias(query, r))
+
+        # Sort and return top_k
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+        return candidates[:top_k]
