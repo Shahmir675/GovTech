@@ -2,24 +2,121 @@ from typing import List, Dict, Any, Tuple, Optional
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 import re
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import PorterStemmer
 
-# Download required NLTK data
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords', quiet=True)
+# Lightweight replacements for NLTK + scikit-learn components to avoid
+# binary incompatibilities in constrained environments (e.g., Kaggle images
+# with mismatched numpy/compiled wheels).
 
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt', quiet=True)
+# --- Simple tokenization, stopwords, and stemming ---
+_BASIC_STOPWORDS = {
+    'a','an','the','and','or','if','in','on','at','of','for','with','without','to','from','by','as',
+    'is','it','this','that','these','those','be','been','being','are','was','were','am','do','does','did','doing',
+    'have','has','had','having','not','no','nor','but','because','so','very','can','could','should','would','may','might','will',
+    'just','also','than','then','once','such','own','same','other','more','most','some','any','each','few','many','much',
+    'here','there','when','where','why','how','all','both','between','into','through','during','before','after','above','below',
+    'up','down','out','over','under','again','further','until','while','about','against','among','within','across','per',
+    'i','me','my','myself','we','our','ours','ourselves','you','your','yours','yourself','yourselves',
+    'he','him','his','himself','she','her','hers','herself','itself','they','them','their','theirs','themselves',
+    'what','which','who','whom','whose','whenever','wherever','whatever','whichever',
+    'been','being','didn','doesn','don','hadn','hasn','haven','isn','ma','mightn','mustn','needn','shan','shouldn','wasn','weren','won','wouldn'
+}
+
+def simple_tokenize(text: str) -> List[str]:
+    return re.findall(r"\b\w+\b", text)
+
+def simple_stem(token: str) -> str:
+    # Very light stemming: common English suffix stripping
+    if len(token) <= 3:
+        return token
+    for suf in ("ization","ations","ation","izers","izer","ities","ility","iveness","fulness",
+                "ously","ness","ment","ments","ingly","ingly","edly","edly","ous","ive","ful","able",
+                "less","ing","ed","ies","ers","er","s"):
+        if token.endswith(suf) and len(token) - len(suf) >= 3:
+            return token[: -len(suf)]
+    return token
+
+# --- Minimal TF-IDF implementation with cosine similarity ---
+class SimpleTfidfVectorizer:
+    def __init__(self, min_df: int = 1, max_df: float = 1.0, max_features: Optional[int] = None):
+        self.min_df = min_df
+        self.max_df = max_df
+        self.max_features = max_features
+        self.vocab_: Dict[str, int] = {}
+        self.idf_: Optional[np.ndarray] = None
+        self.feature_names_: List[str] = []
+
+    def fit(self, docs: List[str]):
+        N = len(docs)
+        if N == 0:
+            self.vocab_ = {}
+            self.idf_ = np.zeros((0,), dtype=np.float32)
+            self.feature_names_ = []
+            return self
+        # Document frequency
+        df: Dict[str, int] = {}
+        for doc in docs:
+            terms = set(doc.split())
+            for t in terms:
+                df[t] = df.get(t, 0) + 1
+
+        # Apply df thresholds
+        max_df_abs = int(self.max_df * N) if 0 < self.max_df <= 1.0 else int(self.max_df)
+        if max_df_abs == 0:
+            max_df_abs = N
+        terms = [t for t, c in df.items() if c >= self.min_df and c <= max_df_abs]
+
+        # Top features if requested (by df descending then alpha)
+        terms.sort(key=lambda t: (-df[t], t))
+        if self.max_features is not None:
+            terms = terms[: self.max_features]
+
+        self.feature_names_ = terms
+        self.vocab_ = {t: i for i, t in enumerate(self.feature_names_)}
+
+        # IDF (smooth like sklearn): log((1 + N) / (1 + df)) + 1
+        idf = np.ones((len(self.vocab_),), dtype=np.float32)
+        for t, i in self.vocab_.items():
+            idf[i] = np.log((1.0 + N) / (1.0 + df[t])) + 1.0
+        self.idf_ = idf
+        return self
+
+    def transform(self, docs: List[str]) -> np.ndarray:
+        V = len(self.vocab_)
+        if V == 0:
+            return np.zeros((len(docs), 0), dtype=np.float32)
+        matrix = np.zeros((len(docs), V), dtype=np.float32)
+        for row, doc in enumerate(docs):
+            counts: Dict[str, int] = {}
+            for term in doc.split():
+                if term in self.vocab_:
+                    counts[term] = counts.get(term, 0) + 1
+            if not counts:
+                continue
+            max_tf = max(counts.values())
+            for term, cnt in counts.items():
+                col = self.vocab_[term]
+                tf = cnt / max_tf
+                matrix[row, col] = tf * self.idf_[col]
+        # L2 normalize rows
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        matrix /= norms
+        return matrix
+
+    def fit_transform(self, docs: List[str]) -> np.ndarray:
+        return self.fit(docs).transform(docs)
+
+def cosine_similarity(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    # Supports shapes: (1, d) x (n, d) or (m, d) x (n, d)
+    if A.ndim == 1:
+        A = A.reshape(1, -1)
+    if B.ndim == 1:
+        B = B.reshape(1, -1)
+    # Normalize
+    A_norm = A / (np.linalg.norm(A, axis=1, keepdims=True) + 1e-12)
+    B_norm = B / (np.linalg.norm(B, axis=1, keepdims=True) + 1e-12)
+    return A_norm @ B_norm.T
 
 class HybridSearchEngine:
     def __init__(
@@ -34,16 +131,15 @@ class HybridSearchEngine:
             self.embedding_model = SentenceTransformer(embedding_model_name)
         self.embedding_model_name = embedding_model_name
         self.bm25 = None
-        self.tfidf_vectorizer = TfidfVectorizer(
+        # Use simple internal TF-IDF to avoid scikit-learn
+        self.tfidf_vectorizer = SimpleTfidfVectorizer(
             max_features=5000,
-            stop_words='english',
-            ngram_range=(1, 3),
             max_df=0.85,
             min_df=2
         )
         self.tfidf_matrix = None
-        self.stemmer = PorterStemmer()
-        self.stop_words = set(stopwords.words('english'))
+        self.stem = simple_stem
+        self.stop_words = set(_BASIC_STOPWORDS)
         
         # Legal-specific stop words and terms
         self.legal_stop_words = {
@@ -74,7 +170,7 @@ class HybridSearchEngine:
         text = re.sub(r'part\s+(\d+)', r'part_\1', text)
         
         # Tokenize
-        tokens = word_tokenize(text)
+        tokens = simple_tokenize(text)
         
         # Remove stop words and apply stemming
         processed_tokens = []
@@ -82,7 +178,7 @@ class HybridSearchEngine:
             if (token not in self.stop_words and 
                 token not in self.legal_stop_words and
                 len(token) > 2):
-                stemmed = self.stemmer.stem(token)
+                stemmed = self.stem(token)
                 processed_tokens.append(stemmed)
         
         return ' '.join(processed_tokens)

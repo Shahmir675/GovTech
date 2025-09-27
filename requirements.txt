@@ -12,7 +12,5 @@ torch
 transformers
 pdfplumber
 pymupdf
-nltk
 spacy
 rank-bm25
-scikit-learn

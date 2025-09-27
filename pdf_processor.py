@@ -4,22 +4,16 @@ import fitz  # PyMuPDF
 from typing import Dict, Any, List, Optional, Tuple
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import re
-import nltk
 from collections import defaultdict
 
-
-def ensure_nltk_resource(resource: str, download_name: Optional[str] = None) -> None:
-    """Ensure that an NLTK resource is available locally."""
-    try:
-        nltk.data.find(resource)
-    except LookupError:
-        nltk.download(download_name or resource.split('/')[-1], quiet=True)
-
-
-# Ensure tokenizer resources are available up front because the RAG pipeline
-# relies heavily on sentence boundaries for legal clauses.
-ensure_nltk_resource('tokenizers/punkt', 'punkt')
-ensure_nltk_resource('tokenizers/punkt_tab', 'punkt_tab')
+"""
+Note: Removed NLTK dependency.
+The processor previously ensured NLTK tokenizers were present, but the
+implementation does not use NLTK anywhere else. Keeping NLTK imported can
+trigger heavy optional imports (e.g., scikit-learn) and cause binary
+incompatibility issues in some environments. This file now operates
+independently of NLTK.
+"""
 
 
 class AdvancedPDFProcessor:
