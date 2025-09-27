@@ -1,26 +1,60 @@
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import numpy as np
 import uuid
 from sentence_transformers import SentenceTransformer
+from hybrid_search import HybridSearchEngine
 
-class QdrantVectorStore:
+
+class EnhancedQdrantVectorStore:
     def __init__(self, url: str, api_key: str, collection_name: str):
         self.client = QdrantClient(url=url, api_key=api_key)
         self.collection_name = collection_name
-        
-        # Initialize Sentence Transformer embedding model
-        try:
-            print("Loading Sentence Transformer model...")
-            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            self.embedding_dim = 384  # Dimension for all-MiniLM-L6-v2
-            print("✅ Sentence Transformer model loaded successfully")
-        except Exception as e:
-            raise Exception(f"Failed to load Sentence Transformer model: {e}")
-        
+
+        self.embedding_variant_weights = [0.6, 0.3, 0.1]
+        self.embedding_backends = self._load_embedding_backends()
+        self.embedding_dim = max(backend['dimension'] for backend in self.embedding_backends)
+        self.primary_backend = self.embedding_backends[0]
+
+        print("Initializing hybrid search engine...")
+        self.hybrid_search = HybridSearchEngine(
+            embedding_model_name=self.primary_backend['name'],
+            embedding_model=self.primary_backend['model']
+        )
+        self.documents_cache: List[Dict[str, Any]] = []
+
         # Create collection if it doesn't exist
         self._create_collection_if_not_exists()
+
+    def _load_embedding_backends(self) -> List[Dict[str, Any]]:
+        """Load a cascade of legal-focused embedding models with graceful fallback."""
+        preferred_models = [
+            ('sentence-transformers/legal-bert-base-uncased', 1.0),
+            ('nlpaueb/legal-bert-base-uncased', 0.9),
+            ('sentence-transformers/all-MiniLM-L6-v2', 0.75)
+        ]
+
+        backends: List[Dict[str, Any]] = []
+        for model_name, weight in preferred_models:
+            try:
+                print(f"Loading embedding model '{model_name}' ...")
+                model = SentenceTransformer(model_name)
+                dimension = model.get_sentence_embedding_dimension()
+                backends.append({
+                    'name': model_name,
+                    'model': model,
+                    'weight': weight,
+                    'dimension': dimension
+                })
+                print(f"✅ Loaded '{model_name}' ({dimension}d, weight={weight})")
+            except Exception as exc:
+                print(f"⚠️  Could not load '{model_name}': {exc}")
+
+        if not backends:
+            raise RuntimeError("No embedding models could be initialized. Please ensure sentence-transformers models are available.")
+
+        return backends
     
     def _create_collection_if_not_exists(self):
         """Create collection with appropriate vector configuration"""
@@ -58,17 +92,96 @@ class QdrantVectorStore:
         )
         print("✅ Collection created successfully")
     
-    def get_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using Sentence Transformers"""
-        try:
-            print(f"Generating embeddings for {len(texts)} texts...")
-            embeddings = self.embedding_model.encode(texts).tolist()
-            print(f"✅ Successfully generated {len(embeddings)} embeddings")
-            return embeddings
-        except Exception as e:
-            print(f"Error generating embeddings: {e}")
-            # Return zero vectors as fallback
-            return [[0.0] * self.embedding_dim] * len(texts)
+    def get_embeddings(self, texts: List[str], metadatas: Optional[List[Dict[str, Any]]] = None) -> List[List[float]]:
+        """Generate blended embeddings emphasising legal structure and terminology."""
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+
+        embeddings: List[List[float]] = []
+        for text, metadata in zip(texts, metadatas):
+            try:
+                vector = self._encode_with_backends(text, metadata)
+            except Exception as exc:
+                print(f"Error generating embeddings for text: {exc}")
+                vector = np.zeros(self.embedding_dim, dtype=float)
+            embeddings.append(vector.tolist())
+
+        print(f"✅ Successfully generated {len(embeddings)} blended embeddings")
+        return embeddings
+
+    def _encode_with_backends(self, text: str, metadata: Dict[str, Any]) -> np.ndarray:
+        inputs = self._prepare_embedding_inputs(text, metadata)
+        combined_vector = np.zeros(self.embedding_dim, dtype=float)
+        total_weight = 0.0
+
+        for backend in self.embedding_backends:
+            try:
+                embeddings = backend['model'].encode(inputs)
+            except Exception as exc:
+                print(f"⚠️  Encoding failed for model '{backend['name']}': {exc}")
+                continue
+
+            if embeddings.ndim == 1:
+                embeddings = np.expand_dims(embeddings, axis=0)
+
+            for idx, variant_vector in enumerate(embeddings):
+                resized_vector = self._resize_vector(variant_vector, backend['dimension'])
+                weight = backend['weight'] * self.embedding_variant_weights[min(idx, len(self.embedding_variant_weights) - 1)]
+                combined_vector += resized_vector * weight
+                total_weight += weight
+
+        if total_weight == 0:
+            return np.zeros(self.embedding_dim, dtype=float)
+
+        return combined_vector / total_weight
+
+    def _prepare_embedding_inputs(self, text: str, metadata: Dict[str, Any]) -> List[str]:
+        """Create multiple legal-aware views of the text for richer embeddings."""
+        inputs = [text]
+
+        context_bits = []
+        for field in ['chapter_number', 'section_number', 'article_number', 'rule_number', 'schedule_number']:
+            if metadata.get(field):
+                context_bits.append(f"{field.replace('_number', '').title()} {metadata[field]}")
+
+        if context_bits:
+            context_line = ' | '.join(context_bits)
+            inputs.append(f"Context: {context_line}\n{text}")
+        else:
+            inputs.append(text)
+
+        key_terms = metadata.get('key_terms') or []
+        if key_terms:
+            inputs.append(' '.join(sorted(set(key_terms))))
+        else:
+            inputs.append(text)
+
+        unique_inputs: List[str] = []
+        seen_inputs = set()
+        for candidate in inputs:
+            normalised = candidate.strip()
+            if not normalised:
+                continue
+            if normalised in seen_inputs:
+                continue
+            unique_inputs.append(normalised)
+            seen_inputs.add(normalised)
+
+        if not unique_inputs:
+            unique_inputs = [text]
+
+        while len(unique_inputs) < len(self.embedding_variant_weights):
+            unique_inputs.append(unique_inputs[-1])
+
+        return unique_inputs[:len(self.embedding_variant_weights)]
+
+    def _resize_vector(self, vector: np.ndarray, source_dim: int) -> np.ndarray:
+        if source_dim == self.embedding_dim:
+            return vector
+        if source_dim > self.embedding_dim:
+            return vector[:self.embedding_dim]
+        padding = np.zeros(self.embedding_dim - source_dim, dtype=float)
+        return np.concatenate([vector, padding])
     
     def add_documents(self, texts: List[str], metadatas: List[Dict[str, Any]] = None):
         """Add documents to the vector store"""
@@ -76,10 +189,12 @@ class QdrantVectorStore:
             metadatas = [{"text": text, "chunk_id": i} for i, text in enumerate(texts)]
         
         # Generate embeddings
-        embeddings = self.get_embeddings(texts)
+        embeddings = self.get_embeddings(texts, metadatas)
         
         # Create points for Qdrant
         points = []
+        documents_for_hybrid = []
+        
         for i, (text, embedding, metadata) in enumerate(zip(texts, embeddings, metadatas)):
             point = PointStruct(
                 id=str(uuid.uuid4()),
@@ -90,15 +205,37 @@ class QdrantVectorStore:
                 }
             )
             points.append(point)
+            
+            # Prepare documents for hybrid search
+            documents_for_hybrid.append({
+                "text": text,
+                "metadata": metadata
+            })
         
         # Upsert points to collection
         self.client.upsert(
             collection_name=self.collection_name,
             points=points
         )
+        
+        # Update documents cache and hybrid search index
+        self.documents_cache.extend(documents_for_hybrid)
+        print("🔍 Indexing documents for hybrid search...")
+        self.hybrid_search.index_documents(self.documents_cache)
+    
+    def add_documents_with_metadata(self, documents_with_metadata: List[Dict[str, Any]]):
+        """Add documents with rich metadata to the vector store"""
+        texts = []
+        metadatas = []
+        
+        for doc in documents_with_metadata:
+            texts.append(doc['text'])
+            metadatas.append(doc['metadata'])
+        
+        self.add_documents(texts, metadatas)
     
     def search(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Search for similar documents"""
+        """Search for similar documents using semantic search only"""
         # Generate query embedding
         query_embedding = self.get_embeddings([query])[0]
         
@@ -117,6 +254,80 @@ class QdrantVectorStore:
                 "score": result.score,
                 "metadata": result.payload.get("metadata", {})
             })
+        
+        return results
+    
+    def hybrid_search_method(self, query: str, limit: int = 5, search_weights: Dict[str, float] = None) -> List[Dict[str, Any]]:
+        """Advanced hybrid search combining multiple search strategies"""
+        if not self.documents_cache:
+            print("⚠️  No documents indexed for hybrid search, falling back to semantic search")
+            return self.search(query, limit)
+        
+        # Use hybrid search engine
+        hybrid_results = self.hybrid_search.hybrid_search(
+            query=query,
+            top_k=limit,
+            weights=search_weights
+        )
+        
+        # Format results for consistency
+        formatted_results = []
+        for result in hybrid_results:
+            formatted_results.append({
+                "text": result['text'],
+                "score": result['score'],
+                "metadata": result['metadata'],
+                "score_breakdown": result.get('score_breakdown', {}),
+                "search_type": "hybrid"
+            })
+        
+        return formatted_results
+    
+    def smart_search(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Intelligent search that chooses the best strategy based on query"""
+        # Analyze query to determine best search strategy
+        query_lower = query.lower()
+        
+        # Check if query contains specific references
+        has_references = any(ref in query_lower for ref in [
+            'section', 'article', 'chapter', 'part', 'clause', 'subclause', 'rule', 'schedule'
+        ])
+        
+        # Check if query is asking for specific information
+        is_specific_query = any(word in query_lower for word in [
+            'what is', 'define', 'definition', 'meaning', 'purpose'
+        ])
+        
+        # Check if query is about procedures or processes
+        is_process_query = any(word in query_lower for word in [
+            'how to', 'process', 'procedure', 'steps', 'method'
+        ])
+        
+        # Determine search weights based on query type
+        if has_references:
+            # Emphasize entity-based search for reference queries
+            weights = {'semantic': 0.3, 'keyword': 0.2, 'tfidf': 0.2, 'entity': 0.3}
+        elif is_specific_query:
+            # Emphasize semantic search for definition queries
+            weights = {'semantic': 0.5, 'keyword': 0.2, 'tfidf': 0.2, 'entity': 0.1}
+        elif is_process_query:
+            # Balanced approach for process queries
+            weights = {'semantic': 0.4, 'keyword': 0.3, 'tfidf': 0.2, 'entity': 0.1}
+        else:
+            # Default balanced weights
+            weights = {'semantic': 0.4, 'keyword': 0.3, 'tfidf': 0.2, 'entity': 0.1}
+        
+        # Perform hybrid search with optimized weights
+        results = self.hybrid_search_method(query, limit, weights)
+        
+        # Add search strategy info to metadata
+        for result in results:
+            result['search_strategy'] = {
+                'weights_used': weights,
+                'query_type': 'reference' if has_references else 
+                            'definition' if is_specific_query else
+                            'process' if is_process_query else 'general'
+            }
         
         return results
     
@@ -141,21 +352,36 @@ class QdrantVectorStore:
         except Exception as e:
             print(f"❌ Error deleting collection: {e}")
             return False
-    
+
     def recreate_collection(self):
         """Delete and recreate the collection with current dimensions"""
         try:
             # Delete if exists
             collections = self.client.get_collections().collections
             collection_names = [col.name for col in collections]
-            
+
             if self.collection_name in collection_names:
                 self.client.delete_collection(self.collection_name)
                 print(f"🗑️  Deleted existing collection '{self.collection_name}'")
-            
+
             # Create new
             self._create_collection_if_not_exists()
             return True
         except Exception as e:
             print(f"❌ Error recreating collection: {e}")
             return False
+
+    def get_embedding_overview(self) -> Dict[str, Any]:
+        """Summarise the embedding ensemble used for indexing."""
+        return {
+            'dimension': self.embedding_dim,
+            'variant_weights': self.embedding_variant_weights,
+            'models': [
+                {
+                    'name': backend['name'],
+                    'weight': backend['weight'],
+                    'dimension': backend['dimension']
+                }
+                for backend in self.embedding_backends
+            ]
+        }
