@@ -93,21 +93,106 @@ class EnhancedQdrantVectorStore:
         print("✅ Collection created successfully")
     
     def get_embeddings(self, texts: List[str], metadatas: Optional[List[Dict[str, Any]]] = None) -> List[List[float]]:
-        """Generate blended embeddings emphasising legal structure and terminology."""
+        """Generate blended embeddings emphasising legal structure and terminology.
+
+        Optimised to batch-encode across all texts per backend and per variant to
+        avoid long stalls when indexing many chunks.
+        """
         if metadatas is None:
             metadatas = [{} for _ in texts]
 
-        embeddings: List[List[float]] = []
-        for text, metadata in zip(texts, metadatas):
-            try:
-                vector = self._encode_with_backends(text, metadata)
-            except Exception as exc:
-                print(f"Error generating embeddings for text: {exc}")
-                vector = np.zeros(self.embedding_dim, dtype=float)
-            embeddings.append(vector.tolist())
+        n = len(texts)
+        if n == 0:
+            return []
 
-        print(f"✅ Successfully generated {len(embeddings)} blended embeddings")
-        return embeddings
+        # Prepare variant inputs per text once
+        try:
+            inputs_per_text: List[List[str]] = [
+                self._prepare_embedding_inputs(t, m) for t, m in zip(texts, metadatas)
+            ]
+        except Exception as exc:
+            print(f"Error preparing embedding inputs: {exc}")
+            inputs_per_text = [[t] for t in texts]
+
+        # Determine how many variants to use (bounded by configured weights)
+        variant_count = min(
+            max((len(v) for v in inputs_per_text), default=1),
+            len(self.embedding_variant_weights)
+        )
+
+        # Ensure each text has exactly variant_count inputs
+        for i in range(n):
+            cur = inputs_per_text[i]
+            if not cur:
+                cur = [texts[i]]
+            while len(cur) < variant_count:
+                cur.append(cur[-1])
+            inputs_per_text[i] = cur[:variant_count]
+
+        print(
+            f"🧮 Generating embeddings for {n} texts | "
+            f"models={len(self.embedding_backends)} | variants={variant_count}"
+        )
+
+        # Accumulate blended vectors
+        combined = np.zeros((n, self.embedding_dim), dtype=float)
+        total_weights = np.zeros((n,), dtype=float)
+
+        # Allow overriding batch size via env var
+        import os
+        try:
+            batch_size = int(os.getenv('RAGBOT_EMBED_BATCH', '64'))
+        except Exception:
+            batch_size = 64
+
+        for b_idx, backend in enumerate(self.embedding_backends):
+            model = backend['model']
+            b_dim = backend['dimension']
+            b_weight = backend['weight']
+            print(f"➡️  Backend {b_idx+1}/{len(self.embedding_backends)}: '{backend['name']}' ({b_dim}d, weight={b_weight})")
+
+            for v_idx in range(variant_count):
+                # Gather v-th variant across all texts
+                variant_inputs = [inputs_per_text[i][v_idx] for i in range(n)]
+
+                # Encode in batches
+                parts: List[np.ndarray] = []
+                for start in range(0, n, batch_size):
+                    end = min(start + batch_size, n)
+                    try:
+                        emb = model.encode(
+                            variant_inputs[start:end],
+                            batch_size=min(batch_size, end - start),
+                            show_progress_bar=False,
+                        )
+                        if isinstance(emb, list):
+                            emb = np.asarray(emb)
+                    except Exception as exc:
+                        print(f"⚠️  Encode failed for backend '{backend['name']}' variant {v_idx+1}: {exc}")
+                        emb = np.zeros((end - start, b_dim), dtype=float)
+                    parts.append(emb)
+                backend_variant_emb = np.vstack(parts)  # (n, b_dim)
+
+                # Resize to target dim once for the whole matrix
+                if b_dim == self.embedding_dim:
+                    resized = backend_variant_emb
+                elif b_dim > self.embedding_dim:
+                    resized = backend_variant_emb[:, : self.embedding_dim]
+                else:
+                    pad = np.zeros((n, self.embedding_dim - b_dim), dtype=float)
+                    resized = np.concatenate([backend_variant_emb, pad], axis=1)
+
+                weight = b_weight * self.embedding_variant_weights[v_idx]
+                combined += resized * weight
+                total_weights += weight
+                print(f"   ✓ Variant {v_idx+1}/{variant_count} encoded and accumulated")
+
+        # Avoid division by zero
+        total_weights_safe = np.where(total_weights == 0.0, 1.0, total_weights)[:, None]
+        final_vectors = combined / total_weights_safe
+
+        print(f"✅ Successfully generated {n} blended embeddings")
+        return [row.tolist() for row in final_vectors]
 
     def _encode_with_backends(self, text: str, metadata: Dict[str, Any]) -> np.ndarray:
         inputs = self._prepare_embedding_inputs(text, metadata)
@@ -212,11 +297,20 @@ class EnhancedQdrantVectorStore:
                 "metadata": metadata
             })
         
-        # Upsert points to collection
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=points
-        )
+        # Upsert points to collection in batches to prevent long blocking calls
+        batch_size = 256
+        total = len(points)
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            try:
+                self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=points[start:end]
+                )
+                print(f"🆙 Upserted {end}/{total} points")
+            except Exception as exc:
+                print(f"❌ Upsert failed for batch {start}:{end} - {exc}")
+                # Continue with remaining batches
         
         # Update documents cache and hybrid search index
         self.documents_cache.extend(documents_for_hybrid)
