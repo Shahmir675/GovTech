@@ -192,6 +192,7 @@ class HybridSearchEngine:
             'parts': [],
             'clauses': [],
             'subclauses': [],
+            'schedules': [],
             'legal_terms': [],
             'numbers': []
         }
@@ -211,6 +212,10 @@ class HybridSearchEngine:
         # Extract part references
         parts = re.findall(r'part\s+(\d+)', text.lower())
         entities['parts'] = list(set(parts))
+
+        # Extract schedule references
+        schedules = re.findall(r'schedule\s+([ivxlcdm]+|\d+)', text.lower())
+        entities['schedules'] = list(set(schedules))
 
         clauses = re.findall(r'clause\s+(\d+|[a-z])', text.lower())
         entities['clauses'] = list(set(clauses))
@@ -371,7 +376,7 @@ class HybridSearchEngine:
             score = 0.0
             
             # Score based on entity matches
-            for entity_type in ['sections', 'articles', 'chapters', 'parts', 'clauses', 'subclauses']:
+            for entity_type in ['sections', 'articles', 'chapters', 'parts', 'schedules', 'clauses', 'subclauses']:
                 query_refs = query_entities.get(entity_type, [])
                 doc_refs = doc_entities.get(entity_type, [])
 
@@ -388,7 +393,7 @@ class HybridSearchEngine:
             
             # Score based on metadata matches
             if metadata:
-                for field in ['section_number', 'chapter_number', 'article_number']:
+                for field in ['section_number', 'chapter_number', 'article_number', 'schedule_number']:
                     if field in metadata and metadata[field]:
                         field_type = field.replace('_number', 's')
                         if field_type in query_entities:

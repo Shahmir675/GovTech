@@ -48,7 +48,15 @@ class AdvancedPDFProcessor:
         # Structure patterns for legal documents (extended for schedules and rules).
         self.structure_patterns = {
             'chapter': re.compile(r'^CHAPTER\s+([IVXLCDM]+|\d+)[\s\-–—]+(.+?)(?=\n|$)', re.IGNORECASE | re.MULTILINE),
-            'section': re.compile(r'^(?:SECTION|SEC\.?)\s+(\d+[A-Z]?(?:-\d+)?)\s*[\-–—:]\s*(.+?)(?=\n|$)', re.IGNORECASE | re.MULTILINE),
+            # Section headings come in multiple styles across Acts.
+            # 1) "SECTION 15 — Title" or "SEC. 15: Title"
+            # 2) "15. Title" at the start of a line (common in PK Acts)
+            # Use a single alternation-based pattern with named groups to ease extraction.
+            'section': re.compile(
+                r'^(?:\s*(?:SECTION|SEC\.?)\s+(?P<section_num1>\d+[A-Z]?(?:-\d+)?)\s*[\-–—:]\s*(?P<section_title1>.+?)\s*$)'
+                r'|^(?P<section_num2>\d+[A-Z]?(?:-\d+)?)\.?\s+(?P<section_title2>[^\n]+?)\s*$',
+                re.IGNORECASE | re.MULTILINE
+            ),
             'article': re.compile(r'^(?:ARTICLE|ART\.?)\s+(\d+[A-Z]?)\s*[\-–—:]\s*(.+?)(?=\n|$)', re.IGNORECASE | re.MULTILINE),
             'part': re.compile(r'^PART\s+([IVXLCDM]+|\d+)[\s\-–—]+(.+?)(?=\n|$)', re.IGNORECASE | re.MULTILINE),
             'rule': re.compile(r'^(?:RULE|R\.)\s+(\d+[A-Z]?)\s*[\-–—:]\s*(.+?)(?=\n|$)', re.IGNORECASE | re.MULTILINE),
@@ -203,21 +211,133 @@ class AdvancedPDFProcessor:
         for structure_type, pattern in self.structure_patterns.items():
             seen_keys = set()
             for match in pattern.finditer(text):
-                number = match.group(1) if match.lastindex else match.group(0)
-                title = match.group(2) if match.lastindex and match.lastindex >= 2 else ""
-                key = (structure_type, number.strip().lower())
+                if structure_type == 'section':
+                    # Handle alternation groups
+                    number = None
+                    title = ""
+                    if match.group('section_num1'):
+                        number = match.group('section_num1')
+                        title = match.group('section_title1') or ""
+                    elif match.group('section_num2'):
+                        number = match.group('section_num2')
+                        title = match.group('section_title2') or ""
+                    if not number:
+                        continue
+                else:
+                    number = match.group(1) if match.lastindex else match.group(0)
+                    title = match.group(2) if match.lastindex and match.lastindex >= 2 else ""
+
+                key = (structure_type, str(number).strip().lower())
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
 
                 structure[structure_type].append({
-                    'number': number.strip(),
-                    'title': title.strip(),
+                    'number': str(number).strip(),
+                    'title': str(title).strip(),
                     'type': structure_type,
                     'start_index': match.start()
                 })
 
         return dict(structure)
+
+    def create_section_scoped_chunks(self, text: str) -> List[Dict[str, Any]]:
+        """Create chunks strictly scoped by Section and Schedule.
+
+        Each chunk represents one complete Section (or Schedule item) with
+        metadata: {section_number, title, schedule_ref}. This ensures retrieval
+        always returns a whole Section/Schedule, never a fragment.
+        """
+        if not text:
+            return []
+
+        structure = self.extract_document_structure(text)
+
+        # Gather only section and schedule headers with positions
+        headers: List[Dict[str, Any]] = []
+        for item in structure.get('section', []):
+            headers.append({
+                'type': 'section',
+                'number': item.get('number'),
+                'title': item.get('title', ''),
+                'start_index': item.get('start_index', 0)
+            })
+        for item in structure.get('schedule', []):
+            headers.append({
+                'type': 'schedule',
+                'number': item.get('number'),
+                'title': item.get('title', ''),  # Often empty; may appear on next line
+                'start_index': item.get('start_index', 0)
+            })
+
+        if not headers:
+            # Fallback: attempt to heuristically split by numeric headings "N. Title"
+            alt_pattern = re.compile(r'(?im)^(?P<num>\d+[A-Z]?(?:-\d+)?)\.?\s+(?P<title>[^\n]+)$')
+            for m in alt_pattern.finditer(text):
+                headers.append({
+                    'type': 'section',
+                    'number': m.group('num'),
+                    'title': m.group('title').strip(),
+                    'start_index': m.start()
+                })
+
+        # Sort headers by position and drop obvious duplicates (same type+number at same start)
+        headers.sort(key=lambda x: x['start_index'])
+        unique: List[Dict[str, Any]] = []
+        seen = set()
+        for h in headers:
+            key = (h['type'], str(h.get('number')).lower(), h['start_index'])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(h)
+        headers = unique
+
+        # Build chunks from header to next header (or end)
+        chunks: List[Dict[str, Any]] = []
+        n = len(headers)
+        for i, h in enumerate(headers):
+            start = h['start_index']
+            end = headers[i + 1]['start_index'] if i + 1 < n else len(text)
+            raw = text[start:end].strip()
+            if not raw:
+                continue
+
+            if h['type'] == 'section':
+                metadata = {
+                    'section_number': h.get('number'),
+                    'title': h.get('title') or '',
+                    'schedule_ref': None,
+                    # Preserve compatibility with UI and embeddings
+                    'section': h.get('title') or '',
+                    'section_number_normalised': h.get('number')
+                }
+            else:  # schedule
+                schedule_ref = h.get('number')
+                # Try to sniff schedule title from the next non-empty line after header
+                chunk_head = raw.split('\n', 2)
+                schedule_title = ''
+                if len(chunk_head) >= 2:
+                    # If the first line is the header itself, look at the next line
+                    schedule_title = chunk_head[1].strip() if chunk_head[1].strip() else ''
+                metadata = {
+                    'section_number': None,
+                    'title': schedule_title,
+                    'schedule_ref': f"Schedule {schedule_ref}",
+                    # Extra fields for consistency
+                    'schedule_number': schedule_ref,
+                    'schedule': schedule_title
+                }
+
+            # Enrich with key terms for search
+            metadata['key_terms'] = self.extract_key_terms(raw)
+
+            chunks.append({
+                'text': raw,
+                'metadata': metadata
+            })
+
+        return chunks
     
     def create_hierarchical_chunks(self, text: str, structure: Dict) -> List[Dict[str, Any]]:
         """Create multi-granular chunks with hierarchical context and metadata."""
@@ -460,6 +580,22 @@ class AdvancedPDFProcessor:
                 print(f"📋 Found {len(items)} {struct_type}(s)")
         
         return chunks_with_metadata, structure
+
+    def process_pdf_section_scoped(self, pdf_path: str) -> Tuple[List[Dict[str, Any]], Dict]:
+        """Section/Schedule-scoped processing pipeline.
+
+        Produces one chunk per Section or Schedule with minimal, stable
+        metadata anchoring to prevent orphaned clause fragments.
+        """
+        print("🔍 Extracting text from PDF...")
+        text = self.extract_text_from_pdf(pdf_path)
+
+        print("📖 Extracting structure and building section-scoped chunks...")
+        structure = self.extract_document_structure(text)
+        chunks = self.create_section_scoped_chunks(text)
+
+        print(f"✅ Created {len(chunks)} section/schedule-scoped chunks")
+        return chunks, structure
     
     def process_pdf(self, pdf_path: str) -> List[str]:
         """Complete PDF processing pipeline (backward compatibility)"""

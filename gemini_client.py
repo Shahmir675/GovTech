@@ -44,7 +44,8 @@ class EnhancedGeminiClient:
             'sections': [],
             'chapters': [],
             'articles': [],
-            'parts': []
+            'parts': [],
+            'schedules': []
         }
         
         for doc in context:
@@ -74,6 +75,19 @@ class EnhancedGeminiClient:
                 if 'part' in metadata and metadata['part']:
                     part_ref += f": {metadata['part']}"
                 citations['parts'].append(part_ref)
+            
+            # Schedule references
+            # Prefer explicit schedule_ref, else use schedule_number and optional title
+            if metadata.get('schedule_ref'):
+                sched = metadata['schedule_ref']
+                if metadata.get('schedule'):
+                    sched += f": {metadata['schedule']}"
+                citations['schedules'].append(sched)
+            elif metadata.get('schedule_number'):
+                sched = f"Schedule {metadata['schedule_number']}"
+                if metadata.get('schedule'):
+                    sched += f": {metadata['schedule']}"
+                citations['schedules'].append(sched)
         
         # Remove duplicates while preserving order
         for key in citations:
@@ -99,11 +113,34 @@ class EnhancedGeminiClient:
                 meta_parts = []
                 if metadata.get('chapter'):
                     meta_parts.append(f"Chapter: {metadata['chapter']}")
-                if metadata.get('section'):
-                    meta_parts.append(f"Section: {metadata['section']}")
+                if metadata.get('part'):
+                    meta_parts.append(f"Part: {metadata['part']}")
+                # Section with number if available
+                if metadata.get('section') or metadata.get('section_number'):
+                    sec_num = metadata.get('section_number')
+                    sec_title = metadata.get('section') or metadata.get('title')
+                    if sec_num and sec_title:
+                        meta_parts.append(f"Section {sec_num}: {sec_title}")
+                    elif sec_num:
+                        meta_parts.append(f"Section {sec_num}")
+                    elif sec_title:
+                        meta_parts.append(f"Section: {sec_title}")
                 if metadata.get('article'):
                     meta_parts.append(f"Article: {metadata['article']}")
-                
+                # Schedule
+                if metadata.get('schedule_ref') or metadata.get('schedule') or metadata.get('schedule_number'):
+                    sched_ref = metadata.get('schedule_ref')
+                    sched_num = metadata.get('schedule_number')
+                    sched_title = metadata.get('schedule') or metadata.get('title')
+                    if sched_ref and sched_title:
+                        meta_parts.append(f"{sched_ref}: {sched_title}")
+                    elif sched_ref:
+                        meta_parts.append(f"{sched_ref}")
+                    elif sched_num and sched_title:
+                        meta_parts.append(f"Schedule {sched_num}: {sched_title}")
+                    elif sched_num:
+                        meta_parts.append(f"Schedule {sched_num}")
+
                 if meta_parts:
                     context_entry += f" - {', '.join(meta_parts)}"
             
@@ -139,7 +176,7 @@ USER QUESTION: {query}
 
 RESPONSE REQUIREMENTS:
 1. **Accuracy**: Base your answer strictly on the provided sources
-2. **Citations**: Reference specific sections, articles, or parts when mentioned in the sources
+2. **Citations**: Reference specific Sections, Schedules, Articles, Parts, or Chapters when mentioned in the sources
 3. **Completeness**: Address all aspects of the question using available information
 4. **Structure**: Organize your response with clear headings if covering multiple points
 5. **Limitations**: If the sources don't fully answer the question, state what additional information would be needed

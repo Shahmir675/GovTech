@@ -115,11 +115,10 @@ def load_documents():
             return False
         
         with st.spinner("Processing PDF document with advanced analysis..."):
-            # Process PDF with advanced features
+            # Process PDF using section/schedule-scoped chunking to ensure
+            # retrieval always returns whole sections (never fragments)
             processor = AdvancedPDFProcessor()
-            
-            # Use advanced processing
-            chunks_with_metadata, structure = processor.process_pdf_advanced(pdf_path)
+            chunks_with_metadata, structure = processor.process_pdf_section_scoped(pdf_path)
             
             # Add documents with metadata to vector store
             st.session_state.vector_store.add_documents_with_metadata(chunks_with_metadata)
@@ -137,11 +136,8 @@ def load_documents():
             }
 
             st.success(
-                "Successfully processed {total} document representations (" \
-                "{clauses} clause-level, {overlaps} contextual overlaps)!".format(
-                    total=total_chunks,
-                    clauses=clause_chunks,
-                    overlaps=overlap_chunks
+                "Successfully processed {total} section/schedule chunks.".format(
+                    total=total_chunks
                 )
             )
             
@@ -249,10 +245,13 @@ def main():
             
             if structure_info:
                 st.markdown("<br>".join(structure_info), unsafe_allow_html=True)
+            # Show concise section/schedule stats
             if st.session_state.processing_stats:
                 stats = st.session_state.processing_stats
+                sec_count = len(st.session_state.document_structure.get('section', []) or [])
+                sched_count = len(st.session_state.document_structure.get('schedule', []) or [])
                 st.caption(
-                    f"Chunks indexed: {stats['total_chunks']} | Clause variants: {stats['clause_chunks']} | Overlaps: {stats['overlap_chunks']}"
+                    f"Section-scoped indexing: {stats['total_chunks']} chunks | Sections: {sec_count} | Schedules: {sched_count}"
                 )
         
         # Search settings
@@ -365,10 +364,32 @@ def main():
                                 structure_info = []
                                 if metadata.get('chapter'):
                                     structure_info.append(f"Chapter: {metadata['chapter']}")
-                                if metadata.get('section'):
-                                    structure_info.append(f"Section: {metadata['section']}")
+                                if metadata.get('part'):
+                                    structure_info.append(f"Part: {metadata['part']}")
+                                if metadata.get('section') or metadata.get('section_number'):
+                                    sec_num = metadata.get('section_number')
+                                    sec_title = metadata.get('section') or metadata.get('title')
+                                    if sec_num and sec_title:
+                                        structure_info.append(f"Section {sec_num}: {sec_title}")
+                                    elif sec_num:
+                                        structure_info.append(f"Section {sec_num}")
+                                    elif sec_title:
+                                        structure_info.append(f"Section: {sec_title}")
                                 if metadata.get('article'):
                                     structure_info.append(f"Article: {metadata['article']}")
+                                # Schedule information
+                                if metadata.get('schedule_ref') or metadata.get('schedule') or metadata.get('schedule_number'):
+                                    sched_ref = metadata.get('schedule_ref')
+                                    sched_num = metadata.get('schedule_number')
+                                    sched_title = metadata.get('schedule') or metadata.get('title')
+                                    if sched_ref and sched_title:
+                                        structure_info.append(f"{sched_ref}: {sched_title}")
+                                    elif sched_ref:
+                                        structure_info.append(f"{sched_ref}")
+                                    elif sched_num and sched_title:
+                                        structure_info.append(f"Schedule {sched_num}: {sched_title}")
+                                    elif sched_num:
+                                        structure_info.append(f"Schedule {sched_num}")
                                 
                                 if structure_info:
                                     source_header += f" - {' | '.join(structure_info)}"
