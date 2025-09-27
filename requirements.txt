@@ -14,3 +14,4 @@ pdfplumber
 pymupdf
 spacy
 rank-bm25
+tqdm
