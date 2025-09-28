@@ -2,11 +2,16 @@ import google.generativeai as genai
 from typing import List, Dict, Any, Tuple
 import re
 import json
+import os
 
 class EnhancedGeminiClient:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel('gemini-2.0-flash')
+        try:
+            self.max_citations = int(os.getenv('RAGBOT_MAX_CITATIONS', '4'))
+        except Exception:
+            self.max_citations = 4
         
         # Legal document analysis templates
         self.legal_analysis_prompts = {
@@ -39,45 +44,56 @@ class EnhancedGeminiClient:
             return 'definition'  # Default
     
     def extract_citations(self, context: List[Dict[str, Any]]) -> Dict[str, List[str]]:
-        """Extract and organize citations from context metadata"""
+        """Extract and organize citations with pinpoint preference.
+
+        Returns dict including 'precise' list (e.g., Section 55(1)(c)) when
+        pinpoint labels are available, else falls back to section-level.
+        """
         citations = {
+            'precise': [],
             'sections': [],
             'chapters': [],
             'articles': [],
             'parts': [],
             'schedules': []
         }
-        
+
         for doc in context:
-            metadata = doc.get('metadata', {})
-            
-            # Extract structural references
-            if 'section_number' in metadata and metadata['section_number']:
-                section_ref = f"Section {metadata['section_number']}"
-                if 'section' in metadata and metadata['section']:
-                    section_ref += f": {metadata['section']}"
-                citations['sections'].append(section_ref)
-            
-            if 'chapter_number' in metadata and metadata['chapter_number']:
+            metadata = doc.get('metadata', {}) or {}
+            labels = doc.get('pinpoint_labels', []) or []
+
+            if metadata.get('section_number'):
+                sec_no = str(metadata.get('section_number'))
+                if labels:
+                    # Join first 2 labels to form nested pinpoint like (1)(a)
+                    chain = labels[:2]
+                    nested = ''.join([f"({x})" for x in chain])
+                    citations['precise'].append(f"Section {sec_no}{nested}")
+                # Always add the base section reference once
+                sec_ref = f"Section {sec_no}"
+                title = metadata.get('section') or metadata.get('title')
+                if title:
+                    sec_ref += f": {title}"
+                citations['sections'].append(sec_ref)
+
+            if metadata.get('chapter_number'):
                 chapter_ref = f"Chapter {metadata['chapter_number']}"
-                if 'chapter' in metadata and metadata['chapter']:
+                if metadata.get('chapter'):
                     chapter_ref += f": {metadata['chapter']}"
                 citations['chapters'].append(chapter_ref)
-            
-            if 'article_number' in metadata and metadata['article_number']:
+
+            if metadata.get('article_number'):
                 article_ref = f"Article {metadata['article_number']}"
-                if 'article' in metadata and metadata['article']:
+                if metadata.get('article'):
                     article_ref += f": {metadata['article']}"
                 citations['articles'].append(article_ref)
-            
-            if 'part_number' in metadata and metadata['part_number']:
+
+            if metadata.get('part_number'):
                 part_ref = f"Part {metadata['part_number']}"
-                if 'part' in metadata and metadata['part']:
+                if metadata.get('part'):
                     part_ref += f": {metadata['part']}"
                 citations['parts'].append(part_ref)
-            
-            # Schedule references
-            # Prefer explicit schedule_ref, else use schedule_number and optional title
+
             if metadata.get('schedule_ref'):
                 sched = metadata['schedule_ref']
                 if metadata.get('schedule'):
@@ -88,11 +104,11 @@ class EnhancedGeminiClient:
                 if metadata.get('schedule'):
                     sched += f": {metadata['schedule']}"
                 citations['schedules'].append(sched)
-        
+
         # Remove duplicates while preserving order
         for key in citations:
             citations[key] = list(dict.fromkeys(citations[key]))
-        
+
         return citations
     
     def create_enhanced_context(self, context: List[Dict[str, Any]]) -> Tuple[str, Dict]:
@@ -144,7 +160,9 @@ class EnhancedGeminiClient:
                 if meta_parts:
                     context_entry += f" - {', '.join(meta_parts)}"
             
-            context_entry += f"\n{text}\n"
+            # Prefer a pre-sliced snippet when available to keep grounding tight
+            snippet = doc.get('sliced_text') or text
+            context_entry += f"\n{snippet}\n"
             context_parts.append(context_entry)
             all_metadata.append(metadata)
         
@@ -153,6 +171,24 @@ class EnhancedGeminiClient:
         
         return context_text, citations
     
+    def _extract_focus_terms(self, query: str) -> List[str]:
+        q = (query or '').lower()
+        base = [t for t in re.findall(r"\b\w+\b", q) if len(t) > 2]
+        clusters = []
+        if any(t in q for t in ['dispute','conflict','resolution','arbitration','mediation','appeal','complaint','grievance']):
+            clusters += ['dispute','conflict','resolution','arbitration','mediation','appeal','complaint','grievance','conciliation']
+        return list(dict.fromkeys(base + clusters))
+
+    def _gap_awareness(self, query: str, context: List[Dict[str, Any]]) -> Dict[str, bool]:
+        """Detect if explicit mechanisms asked are absent in the provided context."""
+        focus = self._extract_focus_terms(query)
+        need_arbitration = any(k in focus for k in ['arbitration','mediator','mediation','ombudsman','independent'])
+        hay = ' '.join([(doc.get('sliced_text') or doc.get('text') or '').lower() for doc in context])
+        has_arb = any(k in hay for k in ['arbitration','mediator','mediation','conciliation','ombudsman'])
+        return {
+            'ask_alt_mechanism': need_arbitration and not has_arb
+        }
+
     def generate_response(self, query: str, context: List[Dict[str, Any]]) -> str:
         """Generate enhanced response using Gemini with advanced RAG context"""
         
@@ -165,6 +201,9 @@ class EnhancedGeminiClient:
         
         # Create enhanced context with metadata
         context_text, citations = self.create_enhanced_context(context)
+
+        # Gap awareness detection
+        gaps = self._gap_awareness(query, context)
         
         # Build comprehensive prompt
         prompt = f"""{base_prompt}
@@ -175,12 +214,12 @@ RELEVANT SOURCES FROM KPK LOCAL GOVERNMENT ACT 2013:
 USER QUESTION: {query}
 
 RESPONSE REQUIREMENTS:
-1. **Accuracy**: Base your answer strictly on the provided sources
-2. **Citations**: Reference specific Sections, Schedules, Articles, Parts, or Chapters when mentioned in the sources
-3. **Completeness**: Address all aspects of the question using available information
-4. **Structure**: Organize your response with clear headings if covering multiple points
-5. **Limitations**: If the sources don't fully answer the question, state what additional information would be needed
-6. **Context**: Explain how different provisions relate to each other when relevant
+1. Base the answer strictly on provided sources. Do not include unrelated sections.
+2. Use pinpoint statutory citations where possible (e.g., Section 55(1)(c)), not chapter-level.
+3. Enforce a max of {self.max_citations} citations; select only the most relevant sections.
+4. If the Act lacks an explicit mechanism asked by the user{', e.g., independent arbitration' if gaps.get('ask_alt_mechanism') else ''}, state this absence clearly instead of padding.
+5. Organize succinctly; avoid filler. Prefer direct rules over summaries.
+6. If multiple provisions apply, explain the relationship briefly.
 
 RESPONSE FORMAT:
 - Start with a direct answer to the question
@@ -194,7 +233,7 @@ ANSWER:"""
             response = self.model.generate_content(prompt)
             response_text = response.text
             
-            # Post-process response to add citation summary
+            # Post-process response to add citation summary (capped)
             citation_summary = self.create_citation_summary(citations)
             if citation_summary:
                 response_text += f"\n\n**LEGAL REFERENCES:**\n{citation_summary}"
@@ -207,12 +246,35 @@ ANSWER:"""
     def create_citation_summary(self, citations: Dict[str, List[str]]) -> str:
         """Create a summary of legal citations"""
         summary_parts = []
-        
-        for citation_type, refs in citations.items():
-            if refs:
-                type_name = citation_type.capitalize()
-                summary_parts.append(f"• **{type_name}**: {', '.join(refs)}")
-        
+
+        # Prefer precise citations first
+        precise = citations.get('precise', [])
+        sections = citations.get('sections', [])
+
+        ordered: List[str] = []
+        ordered.extend(precise)
+        # Include base section refs only if we have room after precise
+        if len(ordered) < self.max_citations:
+            for s in sections:
+                if s not in ordered:
+                    ordered.append(s)
+                    if len(ordered) >= self.max_citations:
+                        break
+
+        if ordered:
+            summary_parts.append(f"• **Sections**: {', '.join(ordered[:self.max_citations])}")
+
+        # Add other containers only if still under cap and present
+        remaining_slots = max(0, self.max_citations - len(ordered))
+        for bucket in ('schedules', 'articles', 'parts', 'chapters'):
+            if remaining_slots <= 0:
+                break
+            bucket_refs = citations.get(bucket, [])
+            if bucket_refs:
+                take = bucket_refs[:remaining_slots]
+                summary_parts.append(f"• **{bucket.capitalize()}**: {', '.join(take)}")
+                remaining_slots -= len(take)
+
         return '\n'.join(summary_parts) if summary_parts else ""
     
     def generate_detailed_analysis(self, query: str, context: List[Dict[str, Any]]) -> Dict[str, Any]:

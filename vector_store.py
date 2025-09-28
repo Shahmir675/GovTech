@@ -5,6 +5,7 @@ import numpy as np
 import uuid
 from sentence_transformers import SentenceTransformer
 from hybrid_search import HybridSearchEngine
+import os
 
 
 class EnhancedQdrantVectorStore:
@@ -339,17 +340,44 @@ class EnhancedQdrantVectorStore:
             query_vector=query_embedding,
             limit=limit
         )
-        
-        # Format results
-        results = []
+        # Format results to common structure
+        raw: List[Dict[str, Any]] = []
         for result in search_results:
-            results.append({
-                "text": result.payload["text"],
-                "score": result.score,
+            raw.append({
+                "text": result.payload.get("text", ""),
+                "score": float(result.score),
                 "metadata": result.payload.get("metadata", {})
             })
-        
-        return results
+
+        # Apply precision filtering for surgical grounding
+        try:
+            max_cites = int(os.getenv('RAGBOT_MAX_CITATIONS', '4'))
+        except Exception:
+            max_cites = 4
+        refined = self.hybrid_search.apply_precision_filters(
+            query=query,
+            results=raw,
+            top_k=limit,
+            max_results=max_cites,
+        )
+
+        # Return formatted results with provenance
+        formatted: List[Dict[str, Any]] = []
+        for r in refined:
+            payload = {
+                "text": r.get('text', ''),
+                "score": float(r.get('score', 0.0)),
+                "metadata": r.get('metadata', {}),
+                "score_breakdown": r.get('score_breakdown', {}),
+                "search_type": "semantic"
+            }
+            if 'sliced_text' in r:
+                payload['sliced_text'] = r['sliced_text']
+            if 'pinpoint_labels' in r:
+                payload['pinpoint_labels'] = r['pinpoint_labels']
+            formatted.append(payload)
+
+        return formatted
     
     def hybrid_search_method(self, query: str, limit: int = 5, search_weights: Dict[str, float] = None) -> List[Dict[str, Any]]:
         """Advanced hybrid search combining multiple search strategies"""
@@ -363,18 +391,35 @@ class EnhancedQdrantVectorStore:
             top_k=limit,
             weights=search_weights
         )
-        
+
+        # Apply precision filters (enforce surgical citations and drop loose matches)
+        try:
+            max_cites = int(os.getenv('RAGBOT_MAX_CITATIONS', '4'))
+        except Exception:
+            max_cites = 4
+        refined = self.hybrid_search.apply_precision_filters(
+            query=query,
+            results=hybrid_results,
+            top_k=limit,
+            max_results=max_cites,
+        )
+
         # Format results for consistency
-        formatted_results = []
-        for result in hybrid_results:
-            formatted_results.append({
+        formatted_results: List[Dict[str, Any]] = []
+        for result in refined:
+            payload = {
                 "text": result['text'],
-                "score": result['score'],
-                "metadata": result['metadata'],
+                "score": float(result.get('score', 0.0)),
+                "metadata": result.get('metadata', {}),
                 "score_breakdown": result.get('score_breakdown', {}),
                 "search_type": "hybrid"
-            })
-        
+            }
+            if 'sliced_text' in result:
+                payload['sliced_text'] = result['sliced_text']
+            if 'pinpoint_labels' in result:
+                payload['pinpoint_labels'] = result['pinpoint_labels']
+            formatted_results.append(payload)
+
         return formatted_results
     
     def smart_search(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:

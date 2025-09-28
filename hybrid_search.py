@@ -198,6 +198,202 @@ class HybridSearchEngine:
             for name, err in tried:
                 print(f"   - {name}: {err}")
         print("ℹ️ Proceeding without cross-encoder re-ranking.")
+
+    # -------- Query focus + precision helpers --------
+    def _extract_focus_terms(self, query: str) -> List[str]:
+        """Extract domain-relevant focus terms from the query.
+
+        Returns a small, de-duplicated list of keywords (lowercased) including
+        synonyms for detected intent clusters (e.g., disputes/conflicts).
+        """
+        q = (query or "").lower()
+        terms: List[str] = []
+
+        # Core content words: strip stop-words and short tokens
+        base_tokens = [t for t in simple_tokenize(q) if len(t) > 2 and t not in self.stop_words]
+        terms.extend(base_tokens)
+
+        # Intent clusters with synonyms
+        clusters = {
+            # Dispute/conflict resolution
+            'dispute': [
+                'dispute', 'disputes', 'conflict', 'conflicts', 'resolution', 'resolve', 'settlement',
+                'redress', 'grievance', 'complaint', 'appeal', 'review', 'mediation', 'arbitration',
+                'conciliation', 'adjudication', 'ombudsman'
+            ],
+            # Elections/constituencies/delimitation
+            'election': [
+                'election', 'elections', 'electoral', 'poll', 'polling', 'vote', 'ballot', 'constituency',
+                'delimitation', 'ward'
+            ],
+            # Finance/audit
+            'finance': [
+                'finance', 'financial', 'fund', 'funds', 'budget', 'account', 'accounts', 'accounting',
+                'audit', 'auditor', 'audited', 'treasury', 'receipt', 'expenditure', 'tax', 'fee', 'fees'
+            ],
+            # Enforcement/penalties
+            'enforcement': [
+                'enforcement', 'penalty', 'penalties', 'offence', 'offense', 'fine', 'fines', 'prosecution',
+                'sanction', 'violation'
+            ],
+        }
+
+        for key, vocab in clusters.items():
+            if any(t in q for t in vocab):
+                terms.extend(vocab)
+
+        # Deduplicate while preserving order
+        seen = set()
+        uniq: List[str] = []
+        for t in terms:
+            if t not in seen:
+                uniq.append(t)
+                seen.add(t)
+        return uniq
+
+    def _keyword_overlap_score(self, focus_terms: List[str], text: str, metadata: Dict[str, Any]) -> float:
+        """Compute a lightweight keyword overlap score [0..1].
+
+        Measures presence of focus terms in text/metadata. Penalises if none
+        are found when focus_terms is non-empty.
+        """
+        if not focus_terms:
+            return 0.0
+        hay = f"{(text or '').lower()} \n {(str(metadata) or '').lower()}"
+        hits = 0
+        budget = 0
+        # Limit budget to first 14 distinct focus terms to keep bounded
+        for t in focus_terms[:14]:
+            budget += 1
+            if t in hay:
+                hits += 1
+        if budget == 0:
+            return 0.0
+        return hits / float(budget)
+
+    def _pinpoint_spans(self, text: str, focus_terms: List[str], window: int = 1) -> Dict[str, Any]:
+        """Extract minimal relevant spans and best-effort subsection labels.
+
+        Returns a dict with:
+          - sliced_text: reduced text containing only lines with focus terms +/- window
+          - labels: list of subsection labels inferred like (1), (a), (i)
+        """
+        if not text:
+            return {"sliced_text": "", "labels": []}
+        lines = [ln for ln in text.split('\n')]
+        focus = [t for t in focus_terms if len(t) > 2]
+        hit_indices = []
+        for i, ln in enumerate(lines):
+            low = ln.lower()
+            if any(t in low for t in focus):
+                hit_indices.append(i)
+        if not hit_indices:
+            return {"sliced_text": "", "labels": []}
+        keep = set()
+        labels: List[str] = []
+        # Patterns for clause labels at line-start
+        p_multi = re.compile(r'^\s*(\(\d+\))?\s*(\([a-z]\))?\s*(\([ivxlcdm]+\))?', re.IGNORECASE)
+        for idx in hit_indices:
+            for j in range(max(0, idx - window), min(len(lines), idx + window + 1)):
+                keep.add(j)
+            # Try to capture a label at or above the hit line
+            target = lines[idx]
+            m = p_multi.match(target)
+            if not any(m.groups()) if m else True:
+                # look one line above for a parent label chain
+                if idx > 0:
+                    prev = lines[idx - 1]
+                    m = p_multi.match(prev)
+            if m:
+                for g in m.groups():
+                    if g:
+                        labels.append(g.strip('()'))
+        sliced_text = '\n'.join([lines[i] for i in sorted(keep)])
+        # De-duplicate labels preserving order
+        seen = set()
+        plabels: List[str] = []
+        for l in labels:
+            if l not in seen:
+                plabels.append(l)
+                seen.add(l)
+        return {"sliced_text": sliced_text, "labels": plabels}
+
+    def apply_precision_filters(
+        self,
+        query: str,
+        results: List[Dict[str, Any]],
+        top_k: int = 5,
+        max_results: int = 4,
+        min_score: float = 0.25,
+        min_overlap: float = 0.12,
+    ) -> List[Dict[str, Any]]:
+        """Filter and slim results to enforce surgical grounding.
+
+        - Rank by final score, then keyword overlap.
+        - Require combined focus overlap when a clear intent cluster exists.
+        - De-duplicate by section/schedule to avoid citation stuffing.
+        - Attach pinpoint span slices and labels for precise citations.
+        """
+        if not results:
+            return []
+
+        focus_terms = self._extract_focus_terms(query)
+        # Determine if we have an intentful focus (e.g., disputes)
+        has_focus = any(k in focus_terms for k in (
+            'dispute', 'conflict', 'resolution', 'arbitration', 'mediation',
+            'appeal', 'complaint', 'grievance'
+        ))
+
+        enriched: List[Dict[str, Any]] = []
+        for r in results:
+            md = r.get('metadata', {}) or {}
+            text = r.get('text', '') or ''
+            overlap = self._keyword_overlap_score(focus_terms, text, md)
+            # Attach breakdown bits so downstream can surface them
+            br = dict(r.get('score_breakdown', {}))
+            br['focus'] = float(overlap)
+            r['score_breakdown'] = br
+
+            # Compute pinpoint spans to reduce context size
+            pin = self._pinpoint_spans(text, focus_terms)
+            if pin.get('sliced_text'):
+                r['sliced_text'] = pin['sliced_text']
+            if pin.get('labels'):
+                r['pinpoint_labels'] = pin['labels']
+
+            enriched.append(r)
+
+        # Soft gate first by score
+        gated = [r for r in enriched if float(r.get('score', 0.0)) >= min_score]
+        if has_focus:
+            # Apply keyword overlap threshold when focus intent detected
+            gated = [r for r in gated if r.get('score_breakdown', {}).get('focus', 0.0) >= min_overlap]
+
+        # De-duplicate by statutory unit (prefer section number, else schedule ref, else text hash)
+        deduped: List[Dict[str, Any]] = []
+        seen_keys = set()
+        for r in sorted(gated, key=lambda x: (float(x.get('score', 0.0)), float(x.get('score_breakdown', {}).get('focus', 0.0))), reverse=True):
+            md = r.get('metadata', {}) or {}
+            key = None
+            if md.get('section_number'):
+                key = f"sec:{md.get('section_number')}"
+            elif md.get('schedule_ref'):
+                key = f"sch:{md.get('schedule_ref')}"
+            else:
+                key = f"hash:{hash(r.get('text',''))}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(r)
+            if len(deduped) >= max_results:
+                break
+
+        # Fallback if all were filtered out: keep top-1 to avoid empty answers
+        if not deduped and results:
+            best = max(results, key=lambda x: float(x.get('score', 0.0)))
+            deduped = [best]
+
+        return deduped
         
     def preprocess_text(self, text: str) -> str:
         """Advanced text preprocessing for legal documents"""
@@ -274,9 +470,10 @@ class HybridSearchEngine:
         legal_patterns = [
             r'\b(?:council|committee|government|district|union|local)\b',
             r'\b(?:power|function|duty|responsibility|authority)\b',
-            r'\b(?:election|member|chairman|mayor|administrator)\b',
-            r'\b(?:budget|fund|tax|fee|development|planning)\b',
-            r'\b(?:notification|rule|regulation|ordinance|act)\b'
+            r'\b(?:election|electoral|member|chairman|mayor|administrator|constituency|delimitation)\b',
+            r'\b(?:budget|fund|tax|fee|development|planning|accounts|audit|auditor)\b',
+            r'\b(?:notification|rule|regulation|ordinance|act)\b',
+            r'\b(?:dispute|conflict|resolution|complaint|grievance|appeal|mediation|arbitration|conciliation)\b'
         ]
         
         for pattern in legal_patterns:
@@ -637,8 +834,12 @@ class HybridSearchEngine:
                 r['score'] = alpha * prior + beta * float(ce[i])
 
         # Final domain-aware touch after CE blending (small adjustments)
+        focus_terms = self._extract_focus_terms(query)
         for r in candidates:
             r['score'] = float(r['score'] + 0.25 * self._apply_domain_bias(query, r))
+            # Small focus-term boost to privilege contextually tight matches
+            ov = self._keyword_overlap_score(focus_terms, r.get('text', '') or '', r.get('metadata', {}) or {})
+            r['score'] = float(r['score'] + 0.15 * ov)
 
         # Sort and return top_k
         candidates.sort(key=lambda x: x['score'], reverse=True)

@@ -92,6 +92,21 @@ ragbot-v1/
 - **Chat Interface**: Streamlit for responsive web UI
 - **AI Response**: Google Gemini 1.5 Flash for generating contextual answers
 
+## Precision Mode (Cleaner, Surgical Citations)
+
+- Retrieval applies semantic + keyword thresholds to discard loosely related passages.
+- Cross-encoder re-ranking (if available) prioritizes contextually tight matches.
+- Results are de-duplicated per section/schedule and trimmed to relevant snippets.
+- Max citations per answer are capped (default 4) to prevent citation-stuffing.
+- Pinpoint citations (e.g., Section 55(1)(c)) are generated when subsection cues are detected.
+- If the Act lacks an explicit mechanism asked by the user (e.g., independent arbitration), the answer states this absence clearly.
+
+Configure citation cap via environment variable:
+
+```
+RAGBOT_MAX_CITATIONS=4
+```
+
 ## Troubleshooting
 
 1. **API Key Issues**: Ensure all API keys are correctly set in `.env`

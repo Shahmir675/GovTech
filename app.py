@@ -407,14 +407,17 @@ def main():
                                     breakdown_text = " | ".join([f"{k}: {v:.2f}" for k, v in breakdown.items() if v > 0])
                                     st.caption(f"Score Breakdown: {breakdown_text}")
                                 
-                                # Show text content
-                                text_preview = result['text'][:400] + "..." if len(result['text']) > 400 else result['text']
+                                # Show text content (prefer precise slice when available)
+                                body = result.get('sliced_text') or result.get('text', '')
+                                text_preview = body[:400] + "..." if len(body) > 400 else body
                                 st.markdown(f"```\n{text_preview}\n```")
                                 
                                 # Show key terms if available
                                 if metadata.get('key_terms'):
                                     st.caption(f"Key Terms: {', '.join(metadata['key_terms'][:5])}")
-                                if metadata.get('is_clause_variant') and metadata.get('clause_label'):
+                                if result.get('pinpoint_labels'):
+                                    st.caption(f"Pinpoint: {', '.join(result['pinpoint_labels'][:3])}")
+                                elif metadata.get('is_clause_variant') and metadata.get('clause_label'):
                                     st.caption(f"Clause Focus: ({metadata['clause_label']})")
 
                                 st.divider()
