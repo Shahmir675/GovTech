@@ -60,10 +60,21 @@ class AdvancedPDFProcessor:
             'article': re.compile(r'^(?:ARTICLE|ART\.?)\s+(\d+[A-Z]?)\s*[\-–—:]\s*(.+?)(?=\n|$)', re.IGNORECASE | re.MULTILINE),
             'part': re.compile(r'^PART\s+([IVXLCDM]+|\d+)[\s\-–—]+(.+?)(?=\n|$)', re.IGNORECASE | re.MULTILINE),
             'rule': re.compile(r'^(?:RULE|R\.)\s+(\d+[A-Z]?)\s*[\-–—:]\s*(.+?)(?=\n|$)', re.IGNORECASE | re.MULTILINE),
-            'schedule': re.compile(r'^(?:SCHEDULE)\s+([IVXLCDM]+|\d+)(?=\s|:)', re.IGNORECASE | re.MULTILINE),
+            # Enhanced schedule pattern to match word-based schedules (FIRST, SECOND, etc.)
+            'schedule': re.compile(
+                r'^(\d+\[)?(?:FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH|EIGHTH|NINTH|TENTH|ELEVENTH|TWELFTH|[IVXLCDM]+|\d+)\s+SCHEDULE',
+                re.IGNORECASE | re.MULTILINE
+            ),
             'clause': re.compile(r'^\((\d+)\)\s+(.+?)(?=\n\(\d+\)|\n[A-Z]|\n\n|$)', re.MULTILINE | re.DOTALL),
             'subsection': re.compile(r'^\(([a-z])\)\s+(.+?)(?=\n\([a-z]\)|\n\(\d+\)|\n[A-Z]|\n\n|$)', re.MULTILINE | re.DOTALL),
             'subclause': re.compile(r'^\(([ivxlcdm]+)\)\s+(.+?)(?=\n\([ivxlcdm]+\)|\n\([a-z]\)|\n\n|$)', re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        }
+
+        # Schedule word-to-number mapping for normalization
+        self.schedule_word_to_num = {
+            'FIRST': '1', 'SECOND': '2', 'THIRD': '3', 'FOURTH': '4',
+            'FIFTH': '5', 'SIXTH': '6', 'SEVENTH': '7', 'EIGHTH': '8',
+            'NINTH': '9', 'TENTH': '10', 'ELEVENTH': '11', 'TWELFTH': '12'
         }
     
     def extract_text_multiple_methods(self, pdf_path: str) -> Dict[str, str]:
@@ -223,6 +234,63 @@ class AdvancedPDFProcessor:
                         title = match.group('section_title2') or ""
                     if not number:
                         continue
+                elif structure_type == 'schedule':
+                    # Enhanced schedule extraction
+                    full_match = match.group(0)
+                    # Extract the schedule identifier (word or number)
+                    schedule_id_match = re.search(
+                        r'(FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH|EIGHTH|NINTH|TENTH|ELEVENTH|TWELFTH|[IVXLCDM]+|\d+)\s+SCHEDULE',
+                        full_match,
+                        re.IGNORECASE
+                    )
+                    if not schedule_id_match:
+                        continue
+
+                    schedule_word = schedule_id_match.group(1).upper()
+                    # Normalize to number
+                    if schedule_word in self.schedule_word_to_num:
+                        number = self.schedule_word_to_num[schedule_word]
+                    elif schedule_word.isdigit():
+                        number = schedule_word
+                    else:
+                        # Roman numeral - convert to number
+                        try:
+                            number = str(self._roman_to_int(schedule_word))
+                        except:
+                            number = schedule_word
+
+                    # Extract reference marker and title from next few lines
+                    start_pos = match.start()
+                    end_pos = min(start_pos + 500, len(text))
+                    snippet = text[start_pos:end_pos]
+
+                    # Look for [See section X] pattern
+                    reference = ""
+                    ref_match = re.search(r'\[See\s+section\s+([^\]]+)\]', snippet, re.IGNORECASE)
+                    if ref_match:
+                        reference = ref_match.group(1).strip()
+
+                    # Extract title (typically on the next non-empty line after header)
+                    lines = snippet.split('\n')
+                    title = ""
+                    for line in lines[1:6]:  # Check next 5 lines
+                        line = line.strip()
+                        if line and not line.startswith('[') and len(line) > 3:
+                            # Skip if it looks like another heading
+                            if not re.match(r'^(PART|CHAPTER|SECTION|SCHEDULE)', line, re.IGNORECASE):
+                                title = line
+                                break
+
+                    # Store both the word form and normalized number
+                    structure[structure_type].append({
+                        'number': number,
+                        'schedule_word': schedule_word,
+                        'title': title,
+                        'reference': reference,
+                        'type': structure_type,
+                        'start_index': match.start()
+                    })
+                    continue
                 else:
                     number = match.group(1) if match.lastindex else match.group(0)
                     title = match.group(2) if match.lastindex and match.lastindex >= 2 else ""
@@ -240,6 +308,21 @@ class AdvancedPDFProcessor:
                 })
 
         return dict(structure)
+
+    def _roman_to_int(self, s: str) -> int:
+        """Convert Roman numeral to integer"""
+        roman_map = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
+        s = s.upper()
+        result = 0
+        prev_value = 0
+        for char in reversed(s):
+            value = roman_map.get(char, 0)
+            if value < prev_value:
+                result -= value
+            else:
+                result += value
+            prev_value = value
+        return result
 
     def create_section_scoped_chunks(self, text: str) -> List[Dict[str, Any]]:
         """Create chunks strictly scoped by Section and Schedule.
@@ -266,7 +349,9 @@ class AdvancedPDFProcessor:
             headers.append({
                 'type': 'schedule',
                 'number': item.get('number'),
-                'title': item.get('title', ''),  # Often empty; may appear on next line
+                'schedule_word': item.get('schedule_word', ''),
+                'title': item.get('title', ''),
+                'reference': item.get('reference', ''),  # [See section X]
                 'start_index': item.get('start_index', 0)
             })
 
@@ -313,23 +398,67 @@ class AdvancedPDFProcessor:
                     'section_number_normalised': h.get('number')
                 }
             else:  # schedule
-                schedule_ref = h.get('number')
-                # Try to sniff schedule title from the next non-empty line after header
-                chunk_head = raw.split('\n', 2)
-                schedule_title = ''
-                if len(chunk_head) >= 2:
-                    # If the first line is the header itself, look at the next line
-                    schedule_title = chunk_head[1].strip() if chunk_head[1].strip() else ''
+                schedule_num = h.get('number')
+                schedule_word = h.get('schedule_word', '')
+                schedule_title = h.get('title', '')
+                schedule_ref_section = h.get('reference', '')
+
+                # Build comprehensive schedule reference
+                if schedule_word and schedule_word.upper() in self.schedule_word_to_num:
+                    # Use word form for display (e.g., "FIFTH SCHEDULE")
+                    schedule_display = f"{schedule_word.title()} Schedule"
+                else:
+                    schedule_display = f"Schedule {schedule_num}"
+
+                # Add section reference if present
+                if schedule_ref_section:
+                    schedule_display += f" [See section {schedule_ref_section}]"
+
+                # Detect schedule parts for hierarchical structure
+                parts = self._extract_schedule_parts(raw)
+
                 metadata = {
                     'section_number': None,
                     'title': schedule_title,
-                    'schedule_ref': f"Schedule {schedule_ref}",
-                    # Extra fields for consistency
-                    'schedule_number': schedule_ref,
-                    'schedule': schedule_title
+                    'schedule_ref': schedule_display,
+                    'schedule_number': schedule_num,
+                    'schedule_word': schedule_word,
+                    'schedule_ordinal': int(schedule_num) if schedule_num.isdigit() else None,
+                    'section_reference': schedule_ref_section,
+                    'schedule': schedule_title,
+                    'has_parts': len(parts) > 0,
+                    'parts': [p['part_id'] for p in parts] if parts else [],
+                    'schedule_type': self._classify_schedule_type(raw, schedule_title)
                 }
 
-            # Enrich with key terms for search
+                # Enrich with schedule-specific key terms
+                metadata['key_terms'] = self.extract_key_terms(raw) + [
+                    'schedule', schedule_word.lower() if schedule_word else '',
+                    f'schedule_{schedule_num}', schedule_title.lower() if schedule_title else ''
+                ]
+                metadata['key_terms'] = [t for t in metadata['key_terms'] if t]  # Remove empty strings
+
+                chunks.append({
+                    'text': raw,
+                    'metadata': metadata
+                })
+
+                # Create additional sub-chunks for parts if schedule is large and has parts
+                if len(raw) > 2000 and parts:
+                    for part_info in parts:
+                        part_metadata = metadata.copy()
+                        part_metadata['is_schedule_part'] = True
+                        part_metadata['part_id'] = part_info['part_id']
+                        part_metadata['part_title'] = part_info.get('title', '')
+                        part_metadata['title'] = f"{schedule_title} - {part_info['part_id']}" if schedule_title else part_info['part_id']
+
+                        chunks.append({
+                            'text': part_info['text'],
+                            'metadata': part_metadata
+                        })
+                continue
+
+            # Enrich with key terms for search (sections)
             metadata['key_terms'] = self.extract_key_terms(raw)
 
             chunks.append({
@@ -338,6 +467,64 @@ class AdvancedPDFProcessor:
             })
 
         return chunks
+
+    def _extract_schedule_parts(self, schedule_text: str) -> List[Dict[str, Any]]:
+        """Extract Part subdivisions from a schedule (e.g., Part-A, Part-I, Part-II)"""
+        parts = []
+        # Pattern for parts: "PART-A", "Part-I", "Part- II", etc.
+        part_pattern = re.compile(r'^(PART[-\s]*([IVXLCDM]+|[A-Z]|[0-9]+))\s*$', re.IGNORECASE | re.MULTILINE)
+
+        lines = schedule_text.split('\n')
+        part_starts = []
+
+        for i, line in enumerate(lines):
+            match = part_pattern.match(line.strip())
+            if match:
+                part_id = match.group(1).strip()
+                part_starts.append((i, part_id))
+
+        # Extract text for each part
+        for idx, (line_num, part_id) in enumerate(part_starts):
+            start_line = line_num
+            end_line = part_starts[idx + 1][0] if idx + 1 < len(part_starts) else len(lines)
+
+            part_lines = lines[start_line:end_line]
+            part_text = '\n'.join(part_lines).strip()
+
+            # Try to extract title (line after part header)
+            title = ''
+            if len(part_lines) > 1:
+                potential_title = part_lines[1].strip()
+                if potential_title and len(potential_title) < 100:
+                    title = potential_title
+
+            if part_text and len(part_text) > 50:  # Minimum content threshold
+                parts.append({
+                    'part_id': part_id,
+                    'title': title,
+                    'text': part_text
+                })
+
+        return parts
+
+    def _classify_schedule_type(self, schedule_text: str, schedule_title: str) -> str:
+        """Classify the type of schedule based on content"""
+        text_lower = (schedule_text + ' ' + schedule_title).lower()
+
+        if any(word in text_lower for word in ['offence', 'offense', 'penalty', 'fine', 'violation']):
+            return 'offences_penalties'
+        elif any(word in text_lower for word in ['form', 'format', 'template', 'ticket']):
+            return 'forms'
+        elif any(word in text_lower for word in ['rule', 'regulation', 'bye-law', 'bylaw']):
+            return 'rules'
+        elif any(word in text_lower for word in ['office', 'devolve', 'department', 'function']):
+            return 'administrative'
+        elif any(word in text_lower for word in ['composition', 'member', 'council', 'elect']):
+            return 'composition'
+        elif any(word in text_lower for word in ['delimitation', 'boundary', 'district']):
+            return 'delimitation'
+        else:
+            return 'general'
     
     def create_hierarchical_chunks(self, text: str, structure: Dict) -> List[Dict[str, Any]]:
         """Create multi-granular chunks with hierarchical context and metadata."""

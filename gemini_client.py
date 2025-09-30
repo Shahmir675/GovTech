@@ -48,6 +48,7 @@ class EnhancedGeminiClient:
 
         Returns dict including 'precise' list (e.g., Section 55(1)(c)) when
         pinpoint labels are available, else falls back to section-level.
+        Enhanced to handle schedule citations with word forms and references.
         """
         citations = {
             'precise': [],
@@ -94,15 +95,55 @@ class EnhancedGeminiClient:
                     part_ref += f": {metadata['part']}"
                 citations['parts'].append(part_ref)
 
+            # Enhanced schedule citation extraction
             if metadata.get('schedule_ref'):
+                # schedule_ref already contains formatted reference (e.g., "Fifth Schedule [See section 66]")
                 sched = metadata['schedule_ref']
-                if metadata.get('schedule'):
-                    sched += f": {metadata['schedule']}"
+                # Add title if present and not already in ref
+                title = metadata.get('title', '').strip()
+                if title and title not in sched:
+                    sched += f": {title}"
                 citations['schedules'].append(sched)
             elif metadata.get('schedule_number'):
-                sched = f"Schedule {metadata['schedule_number']}"
-                if metadata.get('schedule'):
-                    sched += f": {metadata['schedule']}"
+                # Build schedule reference from components
+                schedule_num = metadata['schedule_number']
+                schedule_word = metadata.get('schedule_word', '')
+
+                if schedule_word:
+                    # Use word form (e.g., "Fifth Schedule")
+                    sched = f"{schedule_word.title()} Schedule"
+                else:
+                    sched = f"Schedule {schedule_num}"
+
+                # Add section reference if available
+                section_ref = metadata.get('section_reference', '')
+                if section_ref:
+                    sched += f" [See section {section_ref}]"
+
+                # Add title if available
+                title = metadata.get('schedule') or metadata.get('title')
+                if title:
+                    sched += f": {title}"
+
+                citations['schedules'].append(sched)
+
+            # Handle schedule parts
+            if metadata.get('is_schedule_part'):
+                parent_num = metadata.get('schedule_number')
+                parent_word = metadata.get('schedule_word', '')
+                part_id = metadata.get('part_id', '')
+
+                if parent_word:
+                    sched = f"{parent_word.title()} Schedule - {part_id}"
+                elif parent_num:
+                    sched = f"Schedule {parent_num} - {part_id}"
+                else:
+                    sched = part_id
+
+                part_title = metadata.get('part_title', '')
+                if part_title:
+                    sched += f": {part_title}"
+
                 citations['schedules'].append(sched)
 
         # Remove duplicates while preserving order
@@ -122,7 +163,7 @@ class EnhancedGeminiClient:
             score = doc.get('score', 0)
             
             # Create structured context entry
-            context_entry = f"SOURCE {i+1} (Relevance: {score:.3f})"
+            context_entry = f"Section {i+1} (Relevance: {score:.3f})"
             
             # Add metadata information
             if metadata:
@@ -143,19 +184,34 @@ class EnhancedGeminiClient:
                         meta_parts.append(f"Section: {sec_title}")
                 if metadata.get('article'):
                     meta_parts.append(f"Article: {metadata['article']}")
-                # Schedule
-                if metadata.get('schedule_ref') or metadata.get('schedule') or metadata.get('schedule_number'):
-                    sched_ref = metadata.get('schedule_ref')
+                # Schedule - enhanced display
+                if metadata.get('schedule_ref'):
+                    # Use pre-formatted schedule reference
+                    meta_parts.append(metadata['schedule_ref'])
+                elif metadata.get('schedule_number'):
                     sched_num = metadata.get('schedule_number')
+                    sched_word = metadata.get('schedule_word', '')
                     sched_title = metadata.get('schedule') or metadata.get('title')
-                    if sched_ref and sched_title:
-                        meta_parts.append(f"{sched_ref}: {sched_title}")
-                    elif sched_ref:
-                        meta_parts.append(f"{sched_ref}")
-                    elif sched_num and sched_title:
-                        meta_parts.append(f"Schedule {sched_num}: {sched_title}")
-                    elif sched_num:
-                        meta_parts.append(f"Schedule {sched_num}")
+                    section_ref = metadata.get('section_reference', '')
+
+                    if sched_word:
+                        sched_display = f"{sched_word.title()} Schedule"
+                    else:
+                        sched_display = f"Schedule {sched_num}"
+
+                    if section_ref:
+                        sched_display += f" [See section {section_ref}]"
+
+                    if sched_title:
+                        sched_display += f": {sched_title}"
+
+                    meta_parts.append(sched_display)
+
+                # Schedule part
+                if metadata.get('is_schedule_part'):
+                    part_id = metadata.get('part_id', '')
+                    if part_id:
+                        meta_parts.append(f"Part: {part_id}")
 
                 if meta_parts:
                     context_entry += f" - {', '.join(meta_parts)}"
@@ -208,13 +264,13 @@ class EnhancedGeminiClient:
         # Build comprehensive prompt
         prompt = f"""{base_prompt}
 
-RELEVANT SOURCES FROM KPK LOCAL GOVERNMENT ACT 2013:
+RELEVANT SECTIONS FROM KPK LOCAL GOVERNMENT ACT 2013:
 {context_text}
 
 USER QUESTION: {query}
 
 RESPONSE REQUIREMENTS:
-1. Base the answer strictly on provided sources. Do not include unrelated sections.
+1. Base the answer strictly on provided sections. Do not include unrelated provisions.
 2. Use pinpoint statutory citations where possible (e.g., Section 55(1)(c)), not chapter-level.
 3. Enforce a max of {self.max_citations} citations; select only the most relevant sections.
 4. If the Act lacks an explicit mechanism asked by the user{', e.g., independent arbitration' if gaps.get('ask_alt_mechanism') else ''}, state this absence clearly instead of padding.
@@ -223,8 +279,8 @@ RESPONSE REQUIREMENTS:
 
 RESPONSE FORMAT:
 - Start with a direct answer to the question
-- Provide detailed explanation based on the sources
-- Include relevant citations in format: (Source X, Section/Article Y)
+- Provide detailed explanation based on the sections
+- Include relevant citations in format: (Section X, Clause/Article Y)
 - End with any important caveats or related information
 
 ANSWER:"""

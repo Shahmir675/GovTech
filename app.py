@@ -350,15 +350,15 @@ def main():
                     
                     st.markdown(response)
                     
-                    # Enhanced source display
+                    # Enhanced section display
                     if search_results:
-                        with st.expander("📖 View Detailed Sources", expanded=False):
+                        with st.expander("📖 View Detailed Sections", expanded=False):
                             for i, result in enumerate(search_results):
                                 metadata = result.get('metadata', {})
                                 score = result.get('score', 0)
                                 
-                                # Create source header with metadata
-                                source_header = f"**Source {i+1}** (Relevance: {score:.3f})"
+                                # Create section header with metadata
+                                section_header = f"**Section {i+1}** (Relevance: {score:.3f})"
                                 
                                 # Add structural information
                                 structure_info = []
@@ -392,9 +392,9 @@ def main():
                                         structure_info.append(f"Schedule {sched_num}")
                                 
                                 if structure_info:
-                                    source_header += f" - {' | '.join(structure_info)}"
+                                    section_header += f" - {' | '.join(structure_info)}"
                                 
-                                st.markdown(source_header)
+                                st.markdown(section_header)
                                 
                                 # Show search strategy if available
                                 if 'search_strategy' in result:

@@ -3,8 +3,12 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from typing import List, Dict, Any, Optional
 import numpy as np
 import uuid
-from sentence_transformers import SentenceTransformer
-from hybrid_search import HybridSearchEngine
+import re
+from hybrid_search import (
+    HybridSearchEngine,
+    load_sentence_transformer,
+    encode_with_fallback,
+)
 import os
 
 
@@ -40,7 +44,7 @@ class EnhancedQdrantVectorStore:
         for model_name, weight in preferred_models:
             try:
                 print(f"Loading embedding model '{model_name}' ...")
-                model = SentenceTransformer(model_name)
+                model = load_sentence_transformer(model_name)
                 dimension = model.get_sentence_embedding_dimension()
                 backends.append({
                     'name': model_name,
@@ -161,7 +165,8 @@ class EnhancedQdrantVectorStore:
                 for start in range(0, n, batch_size):
                     end = min(start + batch_size, n)
                     try:
-                        emb = model.encode(
+                        emb = encode_with_fallback(
+                            model,
                             variant_inputs[start:end],
                             batch_size=min(batch_size, end - start),
                             show_progress_bar=False,
@@ -202,7 +207,7 @@ class EnhancedQdrantVectorStore:
 
         for backend in self.embedding_backends:
             try:
-                embeddings = backend['model'].encode(inputs)
+                embeddings = encode_with_fallback(backend['model'], inputs)
             except Exception as exc:
                 print(f"⚠️  Encoding failed for model '{backend['name']}': {exc}")
                 continue
@@ -426,48 +431,65 @@ class EnhancedQdrantVectorStore:
         """Intelligent search that chooses the best strategy based on query"""
         # Analyze query to determine best search strategy
         query_lower = query.lower()
-        
+
+        # Check for schedule-specific queries
+        schedule_patterns = [
+            r'(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth)\s+schedule',
+            r'schedule\s+([ivxlcdm]+|\d+)',
+            r'(\d+)(?:st|nd|rd|th)\s+schedule',
+            r'what\s+(?:does|is)\s+.*?schedule'
+        ]
+        is_schedule_query = any(re.search(pattern, query_lower) for pattern in schedule_patterns)
+
         # Check if query contains specific references
         has_references = any(ref in query_lower for ref in [
             'section', 'article', 'chapter', 'part', 'clause', 'subclause', 'rule', 'schedule'
         ])
-        
+
         # Check if query is asking for specific information
         is_specific_query = any(word in query_lower for word in [
             'what is', 'define', 'definition', 'meaning', 'purpose'
         ])
-        
+
         # Check if query is about procedures or processes
         is_process_query = any(word in query_lower for word in [
             'how to', 'process', 'procedure', 'steps', 'method'
         ])
-        
+
         # Determine search weights based on query type
-        if has_references:
+        if is_schedule_query:
+            # Strongly emphasize entity-based search for schedule queries
+            # Schedules need exact matching more than semantic similarity
+            weights = {'semantic': 0.2, 'keyword': 0.3, 'tfidf': 0.1, 'entity': 0.4}
+            query_type = 'schedule'
+        elif has_references:
             # Emphasize entity-based search for reference queries
             weights = {'semantic': 0.3, 'keyword': 0.2, 'tfidf': 0.2, 'entity': 0.3}
+            query_type = 'reference'
         elif is_specific_query:
             # Emphasize semantic search for definition queries
             weights = {'semantic': 0.5, 'keyword': 0.2, 'tfidf': 0.2, 'entity': 0.1}
+            query_type = 'definition'
         elif is_process_query:
             # Balanced approach for process queries
             weights = {'semantic': 0.4, 'keyword': 0.3, 'tfidf': 0.2, 'entity': 0.1}
+            query_type = 'process'
         else:
             # Default balanced weights
             weights = {'semantic': 0.4, 'keyword': 0.3, 'tfidf': 0.2, 'entity': 0.1}
-        
+            query_type = 'general'
+
         # Perform hybrid search with optimized weights
         results = self.hybrid_search_method(query, limit, weights)
-        
+
         # Add search strategy info to metadata
         for result in results:
             result['search_strategy'] = {
                 'weights_used': weights,
-                'query_type': 'reference' if has_references else 
-                            'definition' if is_specific_query else
-                            'process' if is_process_query else 'general'
+                'query_type': query_type,
+                'is_schedule_query': is_schedule_query
             }
-        
+
         return results
     
     def get_collection_info(self):

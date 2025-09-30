@@ -6,6 +6,11 @@ import re
 import os
 
 try:
+    import torch  # type: ignore
+except Exception:  # pragma: no cover - torch always ships with sentence-transformers
+    torch = None  # type: ignore
+
+try:
     # CrossEncoder provides powerful pairwise re-ranking
     from sentence_transformers import CrossEncoder  # type: ignore
 except Exception:
@@ -28,6 +33,218 @@ _BASIC_STOPWORDS = {
     'what','which','who','whom','whose','whenever','wherever','whatever','whichever',
     'been','being','didn','doesn','don','hadn','hasn','haven','isn','ma','mightn','mustn','needn','shan','shouldn','wasn','weren','won','wouldn'
 }
+
+
+def _normalize_device_name(device: Optional[str]) -> Optional[str]:
+    if device is None:
+        return None
+    value = device.strip()
+    if not value:
+        return None
+    if value.lower() in {"auto", "default"}:
+        return None
+    return value
+
+
+def _build_device_candidates(preferred_device: Optional[str]) -> List[Optional[str]]:
+    env_pref = _normalize_device_name(os.getenv('RAGBOT_EMBED_DEVICE'))
+    pref = _normalize_device_name(preferred_device) or env_pref
+
+    devices_to_try: List[Optional[str]] = []
+
+    def _add_device(candidate: Optional[str]):
+        if candidate in devices_to_try:
+            return
+        devices_to_try.append(candidate)
+
+    if pref is not None:
+        _add_device(pref)
+        lower_pref = pref.lower()
+        if lower_pref.startswith('cuda') or lower_pref == 'mps':
+            _add_device('cpu')
+    else:
+        if torch is not None:
+            if torch.cuda.is_available():  # type: ignore[union-attr]
+                _add_device('cuda')
+            if hasattr(torch, 'backends') and hasattr(torch.backends, 'mps'):
+                try:
+                    if torch.backends.mps.is_available():  # type: ignore[union-attr]
+                        _add_device('mps')
+                except Exception:
+                    pass
+        _add_device('cpu')
+
+    if not devices_to_try:
+        devices_to_try = [None]
+
+    return devices_to_try
+
+
+def _should_retry_on_cpu(error: Exception) -> bool:
+    msg = str(error).lower()
+    triggers = (
+        'cuda error',
+        'cuda runtime error',
+        'no kernel image',
+        'device-side assert',
+        'device kernel image is invalid',
+        'cuda driver',
+        'cublas',
+        'cudnn',
+        'mps backend does not support',
+    )
+    return any(token in msg for token in triggers)
+
+
+def _retarget_model(model: Any, device: str) -> None:
+    if torch is None:
+        return
+    torch_device = torch.device(device)
+    if hasattr(model, 'to'):
+        try:
+            model.to(torch_device)
+        except Exception:
+            pass
+    if hasattr(model, '_target_device'):
+        try:
+            model._target_device = torch_device  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    if hasattr(model, 'model') and hasattr(model.model, 'to'):  # type: ignore[attr-defined]
+        try:
+            model.model.to(torch_device)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    if hasattr(model, 'device'):
+        try:
+            model.device = torch_device  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def encode_with_fallback(model: Any, sentences: Any, *args: Any, **kwargs: Any):
+    """Run SentenceTransformer.encode with CPU retry when CUDA kernels fail."""
+
+    try:
+        return model.encode(sentences, *args, **kwargs)  # type: ignore[attr-defined]
+    except RuntimeError as exc:
+        if not _should_retry_on_cpu(exc):
+            raise
+        if torch is None:
+            raise
+        print(
+            "⚠️  SentenceTransformer encode failed on accelerator: "
+            f"{exc}\n   Retrying on CPU."
+        )
+        _retarget_model(model, 'cpu')
+        safe_kwargs = dict(kwargs)
+        safe_kwargs.pop('device', None)
+        return model.encode(sentences, *args, device='cpu', **safe_kwargs)  # type: ignore[attr-defined]
+
+
+def predict_with_fallback(model: Any, pairs: Any, *args: Any, **kwargs: Any):
+    """Run CrossEncoder.predict with CPU retry when CUDA kernels fail."""
+
+    if not hasattr(model, 'predict'):
+        raise AttributeError("Provided object does not implement predict().")
+
+    try:
+        return model.predict(pairs, *args, **kwargs)  # type: ignore[attr-defined]
+    except RuntimeError as exc:
+        if not _should_retry_on_cpu(exc):
+            raise
+        if torch is None:
+            raise
+        print(
+            "⚠️  Cross-encoder prediction failed on accelerator: "
+            f"{exc}\n   Retrying on CPU."
+        )
+        _retarget_model(model, 'cpu')
+        safe_kwargs = dict(kwargs)
+        cpu_batch = min(16, safe_kwargs.get('batch_size', 32))
+        safe_kwargs['batch_size'] = cpu_batch
+        return model.predict(pairs, *args, **safe_kwargs)  # type: ignore[attr-defined]
+
+
+def load_sentence_transformer(
+    model_name: str,
+    preferred_device: Optional[str] = None,
+) -> SentenceTransformer:
+    """Load a SentenceTransformer with graceful CPU fallback for CUDA issues."""
+
+    devices_to_try = _build_device_candidates(preferred_device)
+
+    tried: List[Tuple[str, str]] = []
+    last_exc: Optional[Exception] = None
+
+    for device in devices_to_try:
+        try:
+            kwargs: Dict[str, Any] = {}
+            if device:
+                kwargs['device'] = device
+            model = SentenceTransformer(model_name, **kwargs)
+            return model
+        except RuntimeError as exc:
+            last_exc = exc
+            msg = str(exc)
+            label = device or 'auto'
+            tried.append((label, msg))
+            lowered = label.lower()
+            if 'cuda' in lowered or lowered == 'mps':
+                print(
+                    f"⚠️  Failed to load '{model_name}' on device '{label}': {msg}\n"
+                    "   Attempting CPU fallback."
+                )
+                continue
+            break
+
+    raise RuntimeError(
+        f"Could not initialise SentenceTransformer '{model_name}' on devices: "
+        + ", ".join([f"{dev} ({err})" for dev, err in tried])
+    ) from last_exc
+
+
+def load_cross_encoder(
+    model_name: str,
+    preferred_device: Optional[str] = None,
+):
+    """Load a CrossEncoder with CPU fallback when CUDA kernels are unavailable."""
+
+    if CrossEncoder is None:
+        raise RuntimeError("CrossEncoder class not available in this environment.")
+
+    devices_to_try = _build_device_candidates(preferred_device)
+    tried: List[Tuple[str, str]] = []
+    last_exc: Optional[Exception] = None
+
+    for device in devices_to_try:
+        try:
+            kwargs: Dict[str, Any] = {}
+            if device:
+                kwargs['device'] = device
+            return CrossEncoder(model_name, **kwargs)  # type: ignore
+        except RuntimeError as exc:
+            last_exc = exc
+            label = device or 'auto'
+            msg = str(exc)
+            tried.append((label, msg))
+            lowered = label.lower()
+            if 'cuda' in lowered or lowered == 'mps':
+                print(
+                    f"⚠️  Failed to load cross-encoder '{model_name}' on device '{label}': {msg}\n"
+                    "   Attempting CPU fallback."
+                )
+                continue
+            break
+        except Exception as exc:
+            last_exc = exc
+            tried.append((device or 'auto', str(exc)))
+            break
+
+    raise RuntimeError(
+        f"Could not initialise CrossEncoder '{model_name}' on devices: "
+        + ", ".join([f"{dev} ({err})" for dev, err in tried])
+    ) from last_exc
 
 def simple_tokenize(text: str) -> List[str]:
     return re.findall(r"\b\w+\b", text)
@@ -129,13 +346,17 @@ class HybridSearchEngine:
     def __init__(
         self,
         embedding_model_name: str = 'all-MiniLM-L6-v2',
-        embedding_model: Optional[SentenceTransformer] = None
+        embedding_model: Optional[SentenceTransformer] = None,
+        embedding_device: Optional[str] = None
     ):
         """Initialize hybrid search engine with semantic and keyword search"""
         if embedding_model is not None:
             self.embedding_model = embedding_model
         else:
-            self.embedding_model = SentenceTransformer(embedding_model_name)
+            self.embedding_model = load_sentence_transformer(
+                embedding_model_name,
+                preferred_device=embedding_device
+            )
         self.embedding_model_name = embedding_model_name
         self.bm25 = None
         # Use simple internal TF-IDF to avoid scikit-learn
@@ -180,6 +401,7 @@ class HybridSearchEngine:
             "cross-encoder/ms-marco-MiniLM-L-12-v2",
             "cross-encoder/stsb-roberta-base",
         ]
+        device_pref = os.getenv("RAGBOT_RERANKER_DEVICE")
         tried = []
         for name in preferred_models:
             name = (name or "").strip()
@@ -187,8 +409,8 @@ class HybridSearchEngine:
                 continue
             try:
                 print(f"Loading cross-encoder reranker '{name}' ...")
-                self.reranker = CrossEncoder(name)
-                print(f"✅ Cross-encoder loaded: {name}")
+                self.reranker = load_cross_encoder(name, preferred_device=device_pref)
+                print(f"✅ Cross-encoder loaded: {name} (device={getattr(self.reranker, 'device', 'cpu')})")
                 return
             except Exception as exc:
                 tried.append((name, str(exc)))
@@ -436,29 +658,45 @@ class HybridSearchEngine:
             'clauses': [],
             'subclauses': [],
             'schedules': [],
+            'schedule_words': [],
             'legal_terms': [],
             'numbers': []
         }
-        
+
         # Extract section references
         sections = re.findall(r'section\s+(\d+)', text.lower())
         entities['sections'] = list(set(sections))
-        
+
         # Extract article references
         articles = re.findall(r'article\s+(\d+)', text.lower())
         entities['articles'] = list(set(articles))
-        
+
         # Extract chapter references
         chapters = re.findall(r'chapter\s+(\d+)', text.lower())
         entities['chapters'] = list(set(chapters))
-        
+
         # Extract part references
         parts = re.findall(r'part\s+(\d+)', text.lower())
         entities['parts'] = list(set(parts))
 
-        # Extract schedule references
+        # Enhanced schedule extraction with word and number forms
+        # Extract numeric schedules: "schedule 5", "schedule V"
         schedules = re.findall(r'schedule\s+([ivxlcdm]+|\d+)', text.lower())
-        entities['schedules'] = list(set(schedules))
+        entities['schedules'].extend(list(set(schedules)))
+
+        # Extract word-based schedules: "fifth schedule", "first schedule"
+        schedule_words = re.findall(
+            r'(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth)\s+schedule',
+            text.lower()
+        )
+        entities['schedule_words'] = list(set(schedule_words))
+
+        # Also capture standalone ordinal numbers that might refer to schedules
+        ordinals = re.findall(r'\b(1st|2nd|3rd|[4-9]th|1[0-2]th)\s+schedule', text.lower())
+        for ordinal in ordinals:
+            num = ordinal.rstrip('stndrh')
+            if num not in entities['schedules']:
+                entities['schedules'].append(num)
 
         clauses = re.findall(r'clause\s+(\d+|[a-z])', text.lower())
         entities['clauses'] = list(set(clauses))
@@ -512,7 +750,7 @@ class HybridSearchEngine:
         
         # Create semantic embeddings
         print("🧠 Generating semantic embeddings...")
-        self.document_embeddings = self.embedding_model.encode(doc_texts)
+        self.document_embeddings = encode_with_fallback(self.embedding_model, doc_texts)
         
         print(f"✅ Indexed {len(documents)} documents")
 
@@ -595,7 +833,7 @@ class HybridSearchEngine:
             return None
         pairs = [(query, r.get('text', '') or '') for r in results]
         try:
-            scores = self.reranker.predict(pairs)
+            scores = predict_with_fallback(self.reranker, pairs)
             if isinstance(scores, list):
                 scores = np.asarray(scores, dtype=np.float32)
             return scores
@@ -666,7 +904,7 @@ class HybridSearchEngine:
             return []
         
         # Generate query embedding
-        query_embedding = self.embedding_model.encode([query])
+        query_embedding = encode_with_fallback(self.embedding_model, [query])
         
         # Calculate similarities
         similarities = cosine_similarity(query_embedding, self.document_embeddings)[0]
@@ -697,34 +935,71 @@ class HybridSearchEngine:
     def entity_based_search(self, query: str, top_k: int = 10) -> List[Tuple[int, float]]:
         """Search based on legal entities and references"""
         query_entities = self.extract_legal_entities(query)
+
+        # Map schedule words to numbers for matching
+        schedule_word_to_num = {
+            'first': '1', 'second': '2', 'third': '3', 'fourth': '4',
+            'fifth': '5', 'sixth': '6', 'seventh': '7', 'eighth': '8',
+            'ninth': '9', 'tenth': '10', 'eleventh': '11', 'twelfth': '12'
+        }
+
+        # Normalize query schedule references
+        query_schedule_nums = set(query_entities.get('schedules', []))
+        for word in query_entities.get('schedule_words', []):
+            if word in schedule_word_to_num:
+                query_schedule_nums.add(schedule_word_to_num[word])
+
         results = []
-        
+
         for i, doc in enumerate(self.documents):
             doc_text = doc.get('text', '')
             doc_entities = self.extract_legal_entities(doc_text)
             metadata = doc.get('metadata', {})
-            
+
             score = 0.0
-            
+
             # Score based on entity matches
-            for entity_type in ['sections', 'articles', 'chapters', 'parts', 'schedules', 'clauses', 'subclauses']:
+            for entity_type in ['sections', 'articles', 'chapters', 'parts', 'clauses', 'subclauses']:
                 query_refs = query_entities.get(entity_type, [])
                 doc_refs = doc_entities.get(entity_type, [])
 
                 for ref in query_refs:
                     if ref in doc_refs:
                         score += 2.0  # High score for exact reference match
-            
+
+            # Enhanced schedule matching
+            if query_schedule_nums:
+                # Check document schedule metadata
+                doc_schedule_num = metadata.get('schedule_number')
+                doc_schedule_word = metadata.get('schedule_word', '').lower()
+                doc_schedule_ordinal = metadata.get('schedule_ordinal')
+
+                # Direct metadata match
+                if doc_schedule_num and str(doc_schedule_num) in query_schedule_nums:
+                    score += 5.0  # Very high score for direct schedule match
+                elif doc_schedule_ordinal and str(doc_schedule_ordinal) in query_schedule_nums:
+                    score += 5.0
+
+                # Word form match
+                for query_word in query_entities.get('schedule_words', []):
+                    if doc_schedule_word and query_word == doc_schedule_word:
+                        score += 5.0
+
+                # Text content match (fallback)
+                for sched_num in query_schedule_nums:
+                    if f"schedule {sched_num}" in doc_text.lower():
+                        score += 1.5
+
             # Score based on legal terms
             query_terms = query_entities.get('legal_terms', [])
             doc_terms = doc_entities.get('legal_terms', [])
-            
+
             common_terms = set(query_terms) & set(doc_terms)
             score += len(common_terms) * 0.5
-            
+
             # Score based on metadata matches
             if metadata:
-                for field in ['section_number', 'chapter_number', 'article_number', 'schedule_number']:
+                for field in ['section_number', 'chapter_number', 'article_number']:
                     if field in metadata and metadata[field]:
                         field_type = field.replace('_number', 's')
                         if field_type in query_entities:
@@ -734,10 +1009,16 @@ class HybridSearchEngine:
                     score += 3.0
                 if metadata.get('is_clause_variant'):
                     score *= 1.1
-            
+
+                # Boost schedule parts if main schedule matches
+                if metadata.get('is_schedule_part') and query_schedule_nums:
+                    parent_schedule = metadata.get('schedule_number')
+                    if parent_schedule and str(parent_schedule) in query_schedule_nums:
+                        score += 2.0
+
             if score > 0:
                 results.append((i, score))
-        
+
         # Sort by score and return top results
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:top_k]
