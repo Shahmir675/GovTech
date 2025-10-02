@@ -114,3 +114,46 @@ class TestDocumentProcessor:
         assert 'analysis' in result
         assert result['analysis']['narrative_claim_count'] >= 0
         assert result['analysis']['petition_claim_count'] >= 0
+        assert 'quality_flag_count' in result['analysis']
+        assert 'section_accuracy_score' in result['analysis']
+        assert 'wrong_domain_rate' in result['analysis']
+        assert 'hallucination_rate' in result['analysis']
+
+    def test_process_case_quality_checks(self, sample_narrative, sample_petition):
+        """Quality checks should cover statutory accuracy and remedies"""
+        processor = DocumentProcessor()
+        result = processor.process_case(sample_narrative, sample_petition)
+
+        assert 'quality_checks' in result
+        quality = result['quality_checks']
+
+        assert 'metrics' in quality
+        assert 'summary' in quality
+
+        metrics = quality['metrics']
+        expected_keys = {
+            'section_router',
+            'statutory_accuracy',
+            'grounding_principles',
+            'pruning_irrelevant_law',
+            'procedural_remedies',
+            'evidence_trail',
+            'constitutional_framing',
+            'narrative_discipline'
+        }
+
+        for key in expected_keys:
+            assert key in metrics
+            assert 'status' in metrics[key]
+            assert 'summary' in metrics[key]
+
+        assert metrics['section_router']['status'] == 'fail'
+        assert metrics['statutory_accuracy']['status'] == 'pass'
+        assert metrics['procedural_remedies']['status'] == 'fail'
+        assert metrics['evidence_trail']['status'] in {'warn', 'fail'}
+        assert 'weighted_score_percent' in quality['summary']
+        assert 'metrics_dashboard' in quality['summary']
+        assert quality['summary']['router_overall_status'] == 'fail'
+        assert 'router' in quality
+        assert quality['router']['actions'], "Router should identify the mis-cited removal action"
+        assert quality['summary']['evidence_callouts'], "Missing evidence should trigger callouts"

@@ -291,12 +291,18 @@ def display_analysis_results(state: WorkflowState):
     st.markdown("---")
     col1, col2 = st.columns([3, 1])
     with col2:
-        if st.button("💾 Download Report"):
-            # Export commentary to markdown
-            if state.commentary:
-                filepath = f"legal_commentary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-                state.orchestrator.drafting_agent.export_commentary_markdown(state.commentary, filepath)
-                st.success(f"Report exported to {filepath}")
+        drafting_agent = getattr(state.orchestrator, 'drafting_agent', None) if hasattr(state, 'orchestrator') else None
+        if state.commentary and drafting_agent:
+            report_name = f"legal_commentary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+            markdown = drafting_agent.build_commentary_markdown(state.commentary)
+            st.download_button(
+                label="💾 Download Report",
+                data=markdown.encode('utf-8'),
+                file_name=report_name,
+                mime="text/markdown"
+            )
+        else:
+            st.caption("Download available after generating commentary")
 
 
 def display_executive_summary(state: WorkflowState):

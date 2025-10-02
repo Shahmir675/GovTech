@@ -468,18 +468,8 @@ Date: {date}
 
         return "\n".join(lines)
 
-    def export_commentary_markdown(
-        self,
-        commentary: Dict[str, Any],
-        filepath: str
-    ) -> None:
-        """
-        Export commentary to Markdown file
-
-        Args:
-            commentary: Generated commentary
-            filepath: Output file path
-        """
+    def build_commentary_markdown(self, commentary: Dict[str, Any]) -> str:
+        """Return the commentary as a Markdown document."""
         md_lines = [
             "# Legal Commentary Report",
             "",
@@ -539,9 +529,26 @@ Date: {date}
             commentary['disclaimer']
         ])
 
-        # Write to file
+        return "\n".join(md_lines)
+
+    def export_commentary_markdown(
+        self,
+        commentary: Dict[str, Any],
+        filepath: str
+    ) -> str:
+        """
+        Export commentary to Markdown file and return the document text.
+
+        Args:
+            commentary: Generated commentary
+            filepath: Output file path
+        """
+        markdown = self.build_commentary_markdown(commentary)
+
         with open(filepath, 'w', encoding='utf-8') as f:
-            f.write("\n".join(md_lines))
+            f.write(markdown)
+
+        return markdown
 
 
 def generate_commentary(
