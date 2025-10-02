@@ -75,6 +75,7 @@ class TestAgentOrchestrator:
         assert orchestrator.case_agent is not None
         assert orchestrator.law_agent is not None
         assert orchestrator.drafting_agent is not None
+        assert orchestrator.judgment_agent is not None
 
     def test_get_summary(self, mock_vector_store, mock_gemini_client):
         """Test workflow summary generation"""
@@ -88,6 +89,26 @@ class TestAgentOrchestrator:
         assert 'status' in summary
         assert 'steps_completed' in summary
         assert 'errors_count' in summary
+
+    def test_workflow_includes_judgment(self, mock_vector_store, mock_gemini_client):
+        """Test that workflow includes judgment step"""
+        orchestrator = AgentOrchestrator(mock_vector_store, mock_gemini_client)
+        state = WorkflowState()
+
+        # Mock judgment data
+        state.judgment = {
+            'winner': 'client',
+            'confidence': 0.75,
+            'decision_factors': [],
+            'narrative': 'Test verdict'
+        }
+
+        summary = orchestrator.get_summary(state)
+
+        assert 'verdict' in summary
+        assert 'verdict_confidence' in summary
+        assert summary['verdict'] == 'client'
+        assert summary['verdict_confidence'] == 0.75
 
 
 if __name__ == "__main__":

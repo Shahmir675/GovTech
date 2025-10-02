@@ -134,7 +134,7 @@ class CaseAgent:
         issues = []
 
         # Extract from petition claims (these are typically the issues raised)
-        petition_claims = extracted_data['petition']['claims']
+        petition_claims = extracted_data.get('petition', {}).get('claims', [])
 
         for claim in petition_claims:
             issue = self._claim_to_issue(claim, source='petition')
@@ -142,7 +142,7 @@ class CaseAgent:
                 issues.append(issue)
 
         # Extract from petition demands (often frame the legal questions)
-        petition_demands = extracted_data['petition']['demands']
+        petition_demands = extracted_data.get('petition', {}).get('demands', [])
 
         for demand in petition_demands:
             issue = self._demand_to_issue(demand, source='petition')
@@ -150,10 +150,10 @@ class CaseAgent:
                 issues.append(issue)
 
         # Extract issues from narrative counter-claims
-        narrative_claims = extracted_data['narrative']['claims']
+        narrative_claims = extracted_data.get('narrative', {}).get('claims', [])
 
         for claim in narrative_claims:
-            if claim['type'] in ['violation', 'allegation']:
+            if claim.get('type') in ['violation', 'allegation']:
                 issue = self._claim_to_issue(claim, source='narrative')
                 if issue:
                     issues.append(issue)
@@ -271,15 +271,16 @@ class CaseAgent:
         narrative_data = extracted_data['narrative']
 
         # Well-documented chronology
-        if len(narrative_data['chronology']) >= 3:
+        chronology_count = len(narrative_data.get('chronology', []))
+        if chronology_count >= 3:
             strengths.append({
                 'category': 'documentation',
-                'description': f"Detailed chronology with {len(narrative_data['chronology'])} dated events",
+                'description': f"Detailed chronology with {chronology_count} dated events",
                 'impact': 'high'
             })
 
         # Strong statutory references
-        statute_refs = [e for e in narrative_data['entities'].get('STATUTE_REF', [])]
+        statute_refs = narrative_data.get('entities', {}).get('STATUTE_REF', [])
         if len(statute_refs) >= 2:
             strengths.append({
                 'category': 'legal_grounding',
@@ -288,15 +289,16 @@ class CaseAgent:
             })
 
         # Clear demands
-        if len(narrative_data['demands']) >= 1:
+        demands_count = len(narrative_data.get('demands', []))
+        if demands_count >= 1:
             strengths.append({
                 'category': 'clarity',
-                'description': f"Clear relief sought with {len(narrative_data['demands'])} specific demand(s)",
+                'description': f"Clear relief sought with {demands_count} specific demand(s)",
                 'impact': 'medium'
             })
 
         # Evidence of jurisdiction
-        if any('jurisdiction' in str(e).lower() for e in narrative_data['entities'].values()):
+        if any('jurisdiction' in str(e).lower() for e in narrative_data.get('entities', {}).values()):
             strengths.append({
                 'category': 'jurisdiction',
                 'description': "Jurisdictional authority explicitly addressed",
@@ -329,7 +331,7 @@ class CaseAgent:
         inconsistencies = extracted_data['inconsistencies']
 
         # Critical inconsistencies
-        critical_inconsistencies = extracted_data['analysis']['critical_inconsistencies']
+        critical_inconsistencies = extracted_data.get('analysis', {}).get('critical_inconsistencies', [])
         if critical_inconsistencies:
             for inc in critical_inconsistencies:
                 weaknesses.append({
@@ -340,8 +342,8 @@ class CaseAgent:
                 })
 
         # Missing counter-claims
-        petition_claim_count = len(petition_data['claims'])
-        narrative_claim_count = len(narrative_data['claims'])
+        petition_claim_count = len(petition_data.get('claims', []))
+        narrative_claim_count = len(narrative_data.get('claims', []))
 
         if petition_claim_count > narrative_claim_count * 1.5:
             weaknesses.append({
@@ -352,7 +354,7 @@ class CaseAgent:
             })
 
         # Lack of statutory backing
-        narrative_statute_refs = narrative_data['entities'].get('STATUTE_REF', [])
+        narrative_statute_refs = narrative_data.get('entities', {}).get('STATUTE_REF', [])
         if len(narrative_statute_refs) < 2:
             weaknesses.append({
                 'category': 'legal_grounding',
@@ -362,7 +364,7 @@ class CaseAgent:
             })
 
         # Missing chronology
-        if len(narrative_data['chronology']) < 2:
+        if len(narrative_data.get('chronology', [])) < 2:
             weaknesses.append({
                 'category': 'documentation',
                 'description': "Weak chronological documentation of events",
@@ -404,13 +406,15 @@ class CaseAgent:
         petition_data = extracted_data['petition']
 
         # Extract key parties
+        narrative_petitioners = narrative_data.get('parties', {}).get('petitioners', [])
+        petition_petitioners = petition_data.get('parties', {}).get('petitioners', [])
+        narrative_authorities = narrative_data.get('parties', {}).get('authorities', [])
+        petition_authorities = petition_data.get('parties', {}).get('authorities', [])
+
         parties = {
-            'user_party': narrative_data['parties'].get('petitioners', ['User'])[0] if narrative_data['parties'].get('petitioners') else 'User',
-            'opponent_party': petition_data['parties'].get('petitioners', ['Opponent'])[0] if petition_data['parties'].get('petitioners') else 'Opponent',
-            'authorities_involved': list(set(
-                narrative_data['parties'].get('authorities', []) +
-                petition_data['parties'].get('authorities', [])
-            ))
+            'user_party': narrative_petitioners[0] if narrative_petitioners else 'User',
+            'opponent_party': petition_petitioners[0] if petition_petitioners else 'Opponent',
+            'authorities_involved': list(set(narrative_authorities + petition_authorities))
         }
 
         # Summarize issues by category
@@ -423,8 +427,8 @@ class CaseAgent:
 
         # Key dates
         all_dates = list(set(
-            [e['date'] for e in narrative_data['chronology']] +
-            [e['date'] for e in petition_data['chronology']]
+            [e.get('date', '') for e in narrative_data.get('chronology', [])] +
+            [e.get('date', '') for e in petition_data.get('chronology', [])]
         ))
 
         return {
@@ -432,7 +436,7 @@ class CaseAgent:
             'issue_count': len(issues),
             'issue_breakdown': issue_breakdown,
             'key_dates': all_dates[:10],  # Top 10 dates
-            'primary_relief_sought': petition_data['demands'][0]['text'] if petition_data['demands'] else 'Not specified',
+            'primary_relief_sought': petition_data.get('demands', [{}])[0].get('text', 'Not specified') if petition_data.get('demands') else 'Not specified',
             'dispute_type': self._infer_dispute_type(issues),
             'complexity': self._assess_complexity(issues, extracted_data),
             'summary_generated_at': datetime.now().isoformat()
@@ -479,11 +483,11 @@ class CaseAgent:
         score += len(extracted_data['inconsistencies']) * 3
 
         # Statutory references
-        score += len(extracted_data['narrative']['entities'].get('STATUTE_REF', [])) * 1
-        score += len(extracted_data['petition']['entities'].get('STATUTE_REF', [])) * 1
+        score += len(extracted_data.get('narrative', {}).get('entities', {}).get('STATUTE_REF', [])) * 1
+        score += len(extracted_data.get('petition', {}).get('entities', {}).get('STATUTE_REF', [])) * 1
 
         # Multiple parties
-        if len(extracted_data['narrative']['parties'].get('authorities', [])) > 2:
+        if len(extracted_data.get('narrative', {}).get('parties', {}).get('authorities', [])) > 2:
             score += 5
 
         if score < 10:

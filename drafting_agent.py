@@ -384,9 +384,11 @@ Use formal legal language appropriate for KPK courts."""
         ])
 
         # Add top 3 recommendations
-        recommendations = case_analysis.get('recommendations', [])[:3]
-        for i, rec in enumerate(recommendations, 1):
-            summary_parts.append(f"{i}. {rec.get('action', 'N/A')}")
+        recommendations = case_analysis.get('recommendations', [])
+        if recommendations:
+            for i, rec in enumerate(recommendations[:3], 1):
+                action = rec.get('action', 'N/A') if isinstance(rec, dict) else str(rec)
+                summary_parts.append(f"{i}. {action}")
 
         return "\n".join(summary_parts)
 
@@ -427,7 +429,12 @@ Date: {date}
 
         lines = []
         for i, issue in enumerate(issues[:10], 1):  # Limit to top 10
-            lines.append(f"{i}. [{issue.get('category', 'general')}] {issue.get('description', '')[:150]}")
+            if isinstance(issue, dict):
+                category = issue.get('category', 'general')
+                description = issue.get('description', '')[:150]
+                lines.append(f"{i}. [{category}] {description}")
+            else:
+                lines.append(f"{i}. {str(issue)[:150]}")
 
         return "\n".join(lines)
 

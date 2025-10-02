@@ -27,6 +27,7 @@ graph TB
         I[Agent Orchestrator] --> J[Case Agent]
         J --> K[Law Agent]
         K --> L[Drafting Agent]
+        L --> JA[Judgment Agent]
         G --> J
         H --> J
         D --> K
@@ -35,9 +36,12 @@ graph TB
 
     subgraph "Output"
         L --> N[Legal Commentary]
+        JA --> V[Verdict]
         N --> O[Petition Critique]
         N --> Q[Counter-Arguments]
         N --> R[Recommendations]
+        V --> T[Winner Decision]
+        V --> U[Confidence Score]
     end
 
     subgraph "Infrastructure"
@@ -97,6 +101,13 @@ sequenceDiagram
     DA->>G: Generate Recommendations
     G-->>DA: Recommendations Text
     DA-->>O: Complete Commentary
+
+    O->>JA: Render Verdict
+    JA->>JA: Score Issues
+    JA->>JA: Synthesize Factors
+    JA->>JA: Calibrate Verdict
+    JA->>JA: Sanity Check
+    JA-->>O: Final Verdict
 
     O-->>UI: Workflow State (Complete)
     deactivate O
@@ -202,7 +213,34 @@ processor.process_case(narrative, petition) -> Dict[str, Any]
 **Input**: Case Analysis + Law Retrieval
 **Output**: Structured legal commentary
 
-### 5. Orchestrator (`orchestrator.py`)
+### 5. Judgment Agent (`judgment_agent.py`)
+
+**Purpose**: Deterministic verdict adjudication using rule-based scoring.
+
+**Key Functions**:
+- Score legal issues based on statutory support
+- Synthesize decision factors from all agent outputs
+- Calibrate verdict (client/opponent/inconclusive)
+- Calculate confidence score (0-1)
+- Apply sanity checks for critical gaps
+
+**Judgment Engine Thinking Protocol**:
+1. **Issue Scoring**: Weigh petition allegations vs counter-arguments, emphasize high-confidence statutory matches
+2. **Factor Synthesis**: Extract factual/procedural/legal factors, tag with directional impact (client/opponent/neutral)
+3. **Verdict Calibration**: Aggregate factor balance → winner decision, assign confidence reflecting factor asymmetry
+4. **Sanity Check**: Probe for critical weaknesses/missing evidence, reduce confidence if high-severity gaps found
+
+**Decision Factors**:
+- Statutory support depth
+- Procedural compliance
+- Factual strength (documentation, chronology)
+- Counter-argument quality
+- Weakness mitigation
+
+**Input**: Case Analysis + Law Retrieval + Commentary
+**Output**: Verdict with winner, confidence, factors, narrative
+
+### 6. Orchestrator (`orchestrator.py`)
 
 **Purpose**: Coordinate multi-agent workflow execution.
 
@@ -215,6 +253,7 @@ processor.process_case(narrative, petition) -> Dict[str, Any]
 2. **Case Analysis**: Issue extraction
 3. **Law Retrieval**: Query law corpus
 4. **Drafting**: Generate commentary
+5. **Judgment**: Render verdict (NEW)
 
 **Features**:
 - Sequential execution with state persistence
@@ -222,7 +261,7 @@ processor.process_case(narrative, petition) -> Dict[str, Any]
 - Resumable workflows (save/load state)
 - Execution logging for audit
 
-### 6. UI Layer (`app_v2.py`)
+### 7. UI Layer (`app_v2.py`)
 
 **Purpose**: Streamlit interface for both v1 and v2 modes.
 
@@ -233,13 +272,22 @@ processor.process_case(narrative, petition) -> Dict[str, Any]
 **v2 UI Features**:
 - Dual input (Narrative + Petition)
 - Tabbed output display:
-  - Executive Summary
+  - Executive Summary (includes verdict highlight)
   - Entities & Claims
   - Legal Issues
   - Relevant Laws
   - Legal Commentary
+  - **Verdict** (NEW: detailed adjudication analysis)
 - Markdown export for reports
 - Real-time workflow status
+
+**Verdict Tab Features**:
+- Winner display (client/opponent/inconclusive)
+- Confidence percentage
+- Narrative explanation
+- Decision factors breakdown (categorized by impact)
+- Factor score summary
+- Confidence adjustment history
 
 ## Data Flow
 

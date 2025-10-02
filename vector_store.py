@@ -84,7 +84,7 @@ class EnhancedQdrantVectorStore:
                 print(f"Error checking collection: {e}, recreating...")
                 try:
                     self.client.delete_collection(self.collection_name)
-                except:
+                except Exception:
                     pass  # Collection might not exist
         
         print(f"🔨 Creating new collection with {self.embedding_dim} dimensions...")

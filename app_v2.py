@@ -264,12 +264,13 @@ def display_analysis_results(state: WorkflowState):
     st.markdown('<div class="section-header">📊 Analysis Results</div>', unsafe_allow_html=True)
 
     # Create tabs for different outputs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📋 Executive Summary",
         "🔍 Entities & Claims",
         "⚖️ Legal Issues",
         "📚 Relevant Laws",
-        "✍️ Legal Commentary"
+        "✍️ Legal Commentary",
+        "⚖️ Verdict"
     ])
 
     with tab1:
@@ -286,6 +287,9 @@ def display_analysis_results(state: WorkflowState):
 
     with tab5:
         display_commentary(state)
+
+    with tab6:
+        display_verdict(state)
 
     # Export options
     st.markdown("---")
@@ -312,6 +316,25 @@ def display_executive_summary(state: WorkflowState):
 
     # Display workflow summary
     summary = state.orchestrator.get_summary(state) if hasattr(state, 'orchestrator') else {}
+
+    # Verdict highlight if available
+    if state.judgment:
+        winner = state.judgment.get('winner', 'inconclusive')
+        confidence = state.judgment.get('confidence', 0.0)
+
+        if winner == 'client':
+            st.markdown('<div class="success-box">', unsafe_allow_html=True)
+            st.markdown(f"### 🎉 Verdict: Client Favored ({confidence:.1%} confidence)")
+        elif winner == 'opponent':
+            st.markdown('<div class="error-box">', unsafe_allow_html=True)
+            st.markdown(f"### ⚠️ Verdict: Opponent Favored ({confidence:.1%} confidence)")
+        else:
+            st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+            st.markdown(f"### ⚖️ Verdict: Inconclusive ({confidence:.1%} confidence)")
+
+        st.markdown(state.judgment.get('narrative', ''))
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("---")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -489,6 +512,117 @@ def display_commentary(state: WorkflowState):
     st.markdown('<div class="warning-box">', unsafe_allow_html=True)
     st.markdown(commentary['disclaimer'])
     st.markdown('</div>', unsafe_allow_html=True)
+
+
+def display_verdict(state: WorkflowState):
+    """Display detailed verdict analysis"""
+    if not state.judgment:
+        st.warning("No verdict available")
+        return
+
+    verdict = state.judgment
+    winner = verdict.get('winner', 'inconclusive')
+    confidence = verdict.get('confidence', 0.0)
+    factors = verdict.get('decision_factors', [])
+    narrative = verdict.get('narrative', '')
+
+    # Header with verdict
+    if winner == 'client':
+        st.markdown('<div class="success-box">', unsafe_allow_html=True)
+        st.markdown(f"## 🎉 Verdict: Client Favored")
+        st.markdown(f"### Confidence: {confidence:.1%}")
+    elif winner == 'opponent':
+        st.markdown('<div class="error-box">', unsafe_allow_html=True)
+        st.markdown(f"## ⚠️ Verdict: Opponent Favored")
+        st.markdown(f"### Confidence: {confidence:.1%}")
+    else:
+        st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+        st.markdown(f"## ⚖️ Verdict: Inconclusive")
+        st.markdown(f"### Confidence: {confidence:.1%}")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Narrative explanation
+    st.markdown("---")
+    st.markdown("### 📖 Explanation")
+    st.markdown(narrative)
+
+    # Decision factors
+    st.markdown("---")
+    st.markdown("### 📊 Decision Factors")
+
+    # Categorize factors
+    client_factors = [f for f in factors if f['impact'] == 'client']
+    opponent_factors = [f for f in factors if f['impact'] == 'opponent']
+    neutral_factors = [f for f in factors if f['impact'] == 'neutral']
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown(f"#### ✅ Client Favorable ({len(client_factors)})")
+        for factor in client_factors:
+            with st.expander(f"{factor['factor'].replace('_', ' ').title()} ({factor.get('weight', 0.0):+.1f})"):
+                st.markdown(f"**Weight**: {factor.get('weight', 0.0):+.1f}")
+                st.markdown(f"**Evidence**: {factor['evidence']}")
+                if 'explanation' in factor:
+                    st.markdown(f"\n**Why This Matters**:")
+                    st.info(factor['explanation'])
+
+    with col2:
+        st.markdown(f"#### ❌ Opponent Favorable ({len(opponent_factors)})")
+        for factor in opponent_factors:
+            with st.expander(f"{factor['factor'].replace('_', ' ').title()} ({factor.get('weight', 0.0):+.1f})"):
+                st.markdown(f"**Weight**: {factor.get('weight', 0.0):+.1f}")
+                st.markdown(f"**Evidence**: {factor['evidence']}")
+                if 'explanation' in factor:
+                    st.markdown(f"\n**Why This Matters**:")
+                    st.warning(factor['explanation'])
+
+    with col3:
+        st.markdown(f"#### ⚪ Neutral ({len(neutral_factors)})")
+        for factor in neutral_factors:
+            with st.expander(f"{factor['factor'].replace('_', ' ').title()} ({factor.get('weight', 0.0):+.1f})"):
+                st.markdown(f"**Weight**: {factor.get('weight', 0.0):+.1f}")
+                st.markdown(f"**Evidence**: {factor['evidence']}")
+                if 'explanation' in factor:
+                    st.markdown(f"\n**Why This Matters**:")
+                    st.markdown(factor['explanation'])
+
+    # Factor score summary
+    st.markdown("---")
+    st.markdown("### 📈 Factor Score Summary")
+
+    client_score = sum(f.get('weight', 0.0) for f in client_factors)
+    opponent_score = sum(abs(f.get('weight', 0.0)) for f in opponent_factors)
+    total_magnitude = client_score + opponent_score
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Client Score", f"{client_score:+.1f}")
+    with col2:
+        st.metric("Opponent Score", f"{opponent_score:+.1f}")
+    with col3:
+        st.metric("Total Magnitude", f"{total_magnitude:.1f}")
+
+    # Metadata
+    if 'metadata' in verdict:
+        st.markdown("---")
+        st.markdown("### 🔍 Analysis Metadata")
+        metadata = verdict['metadata']
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.caption(f"**Issues Considered**: {metadata.get('issue_count', 0)}")
+        with col2:
+            st.caption(f"**Statutory Sections**: {metadata.get('statutory_sections_considered', 0)}")
+        with col3:
+            st.caption(f"**Decision Factors**: {metadata.get('factor_count', 0)}")
+
+        # Sanity adjustments
+        if metadata.get('sanity_adjustments'):
+            st.markdown("**Confidence Adjustments:**")
+            for adjustment in metadata['sanity_adjustments']:
+                st.caption(f"- {adjustment}")
 
 
 def main():

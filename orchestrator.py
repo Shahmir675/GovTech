@@ -16,6 +16,7 @@ from processing import DocumentProcessor
 from case_agent import CaseAgent
 from law_agent import LawAgent
 from drafting_agent import DraftingAgent
+from judgment_agent import JudgmentAgent
 from vector_store import EnhancedQdrantVectorStore
 from gemini_client import EnhancedGeminiClient
 
@@ -27,6 +28,7 @@ class WorkflowStatus(Enum):
     CASE_ANALYSIS = "case_analysis"
     LAW_RETRIEVAL = "law_retrieval"
     DRAFTING = "drafting"
+    JUDGMENT = "judgment"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -59,6 +61,7 @@ class WorkflowState:
         self.case_analysis = None
         self.law_retrieval = None
         self.commentary = None
+        self.judgment = None
 
         # Errors and warnings
         self.errors = []
@@ -125,7 +128,8 @@ class WorkflowState:
                 'processed_data': self.processed_data,
                 'case_analysis': self.case_analysis,
                 'law_retrieval': self.law_retrieval,
-                'commentary': self.commentary
+                'commentary': self.commentary,
+                'judgment': self.judgment
             },
             'errors': self.errors,
             'warnings': self.warnings,
@@ -158,6 +162,7 @@ class WorkflowState:
         state.case_analysis = data['outputs']['case_analysis']
         state.law_retrieval = data['outputs']['law_retrieval']
         state.commentary = data['outputs']['commentary']
+        state.judgment = data['outputs'].get('judgment')
 
         state.errors = data['errors']
         state.warnings = data['warnings']
@@ -191,6 +196,7 @@ class AgentOrchestrator:
         self.case_agent = CaseAgent(gemini_client=gemini_client)
         self.law_agent = LawAgent(vector_store=vector_store)
         self.drafting_agent = DraftingAgent(gemini_client=gemini_client)
+        self.judgment_agent = JudgmentAgent()
 
     def execute_workflow(
         self,
@@ -234,6 +240,10 @@ class AgentOrchestrator:
             # Step 4: Drafting Commentary
             state.status = WorkflowStatus.DRAFTING
             state = self._execute_drafting(state)
+
+            # Step 5: Judgment & Verdict
+            state.status = WorkflowStatus.JUDGMENT
+            state = self._execute_judgment(state)
 
             # Mark as completed
             state.status = WorkflowStatus.COMPLETED
@@ -385,6 +395,32 @@ class AgentOrchestrator:
 
         return state
 
+    def _execute_judgment(self, state: WorkflowState) -> WorkflowState:
+        """Execute judgment/verdict step"""
+        print("⚖️  Step 5: Rendering verdict...")
+
+        try:
+            verdict = self.judgment_agent.render_verdict(
+                state.case_analysis,
+                state.law_retrieval,
+                state.commentary
+            )
+
+            state.judgment = verdict
+            winner = verdict['winner']
+            confidence = verdict['confidence']
+
+            state.log_step('judgment', 'success', f"Winner: {winner} ({confidence:.2%})")
+
+            print(f"  ✅ Verdict rendered: {winner.upper()} ({confidence:.1%} confidence)")
+
+        except Exception as e:
+            state.add_error(f"Judgment failed: {str(e)}", step='judgment')
+            print(f"  ❌ Judgment error: {e}")
+            raise
+
+        return state
+
     def resume_workflow(self, state: WorkflowState) -> WorkflowState:
         """
         Resume workflow from saved state
@@ -414,6 +450,11 @@ class AgentOrchestrator:
 
         elif state.status == WorkflowStatus.DRAFTING:
             state = self._execute_drafting(state)
+            state = self._execute_judgment(state)
+            state.status = WorkflowStatus.COMPLETED
+
+        elif state.status == WorkflowStatus.JUDGMENT:
+            state = self._execute_judgment(state)
             state.status = WorkflowStatus.COMPLETED
 
         else:
@@ -452,6 +493,13 @@ class AgentOrchestrator:
             summary['commentary_generated'] = True
         else:
             summary['commentary_generated'] = False
+
+        if state.judgment:
+            summary['verdict'] = state.judgment.get('winner')
+            summary['verdict_confidence'] = state.judgment.get('confidence')
+        else:
+            summary['verdict'] = None
+            summary['verdict_confidence'] = None
 
         return summary
 

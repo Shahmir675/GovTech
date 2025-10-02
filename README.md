@@ -5,13 +5,14 @@ An intelligent multi-agent legal assistant for analyzing legal disputes under th
 ## Features
 
 ### 🆕 RAGBot-v2 (Multi-Agent Mode)
-- ⚖️ **Multi-Agent Legal Analysis**: Narrative + Petition → Comprehensive Legal Commentary
+- ⚖️ **Multi-Agent Legal Analysis**: Narrative + Petition → Comprehensive Legal Commentary + Verdict
 - 🔍 **Processing Layer**: Named Entity Recognition (NER) + Claim Extraction
 - 🧠 **Case Agent**: Extracts legal issues, identifies strengths/weaknesses, generates recommendations
 - 📚 **Law Agent**: Retrieves relevant statutory provisions with hybrid search
 - ✍️ **Drafting Agent**: Generates petition critique, counter-arguments, and strategic guidance
-- 🎯 **Orchestration**: Automated workflow with state persistence and audit trail
-- 📊 **Structured Output**: Executive summary, entities, legal issues, law sections, commentary
+- ⚖️ **Judgment Agent**: Deterministic verdict adjudication with confidence scoring (NEW)
+- 🎯 **Orchestration**: Automated 5-step workflow with state persistence and audit trail
+- 📊 **Structured Output**: Executive summary, entities, legal issues, law sections, commentary, verdict
 - 💾 **Export**: Download legal commentary reports in Markdown format
 
 ### 📖 RAGBot-v1 (Q&A Mode) - Backward Compatible
@@ -112,11 +113,12 @@ streamlit run app.py
 3. **Enter Opponent's Petition**: Paste the opponent's petition text
 4. Click "🚀 Run Multi-Agent Analysis"
 5. Review results in tabbed interface:
-   - **Executive Summary**: Key metrics and findings
+   - **Executive Summary**: Key metrics, findings, and verdict highlight
    - **Entities & Claims**: Extracted information from both documents
    - **Legal Issues**: Identified issues, strengths, weaknesses
    - **Relevant Laws**: Retrieved statutory provisions with citations
    - **Legal Commentary**: Petition critique, counter-arguments, recommendations
+   - **Verdict**: Winner (client/opponent/inconclusive), confidence score, decision factors (NEW)
 
 **Example Narrative:**
 ```
@@ -140,10 +142,11 @@ ragbot-v2/
 ├── app.py                          # v1 Streamlit application (Q&A mode)
 ├── app_v2.py                       # v2 Streamlit application (Multi-Agent mode)
 ├── orchestrator.py                 # Agent orchestration and workflow management
-├── processing.py                   # NER + Claim extraction (NEW)
-├── case_agent.py                   # Legal issue extraction agent (NEW)
-├── law_agent.py                    # Law retrieval agent (NEW)
-├── drafting_agent.py               # Legal commentary generation agent (NEW)
+├── processing.py                   # NER + Claim extraction
+├── case_agent.py                   # Legal issue extraction agent
+├── law_agent.py                    # Law retrieval agent
+├── judgment_agent.py               # Deterministic verdict adjudication (NEW)
+├── drafting_agent.py               # Legal commentary generation agent
 ├── pdf_processor.py                # PDF processing with section-scoped chunking
 ├── vector_store.py                 # Qdrant vector store with hybrid search
 ├── hybrid_search.py                # BM25 + semantic + TF-IDF + entity search
@@ -173,13 +176,18 @@ ragbot-v2/
 
 ### v2 Architecture (Multi-Agent)
 - **Processing Layer**: spaCy NER + regex-based claim extraction
-- **Agent Framework**: Modular agents (Case, Law, Drafting) with orchestration
+- **Agent Framework**: Modular agents (Case, Law, Drafting, Judgment) with orchestration
 - **Case Agent**: Issue extraction with category classification and strategic analysis
 - **Law Agent**: Retrieves relevant statutes using hybrid search (reuses v1 infrastructure)
 - **Drafting Agent**: Gemini-powered legal commentary generation with formal templates
-- **Orchestration**: Sequential workflow with state persistence and error handling
+- **Judgment Agent**: Rule-based verdict engine with deterministic scoring (no LLM)
+  - Triangulates issue strength, statutory support, and advocacy signals
+  - Produces winner (client/opponent/inconclusive) with 0-1 confidence score
+  - Generates decision factors with directional impact and evidence citations
+  - Applies sanity checks for critical gaps and adjusts confidence accordingly
+- **Orchestration**: 5-step sequential workflow with state persistence and error handling
 - **Workflow State**: JSON-serializable state for audit trail and resume capability
-- **UI**: Tabbed interface with executive summary, entities, issues, laws, and commentary
+- **UI**: Tabbed interface with executive summary, entities, issues, laws, commentary, and verdict
 
 ## Precision Mode (Cleaner, Surgical Citations)
 
